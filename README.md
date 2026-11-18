@@ -90,6 +90,9 @@ and [known limitations](docs/LIMITATIONS.md).
    hermes config set voice.voice_chat_mode gpt-live
    ```
 
+   This integration adds `voice.gpt_live.provider` in code; the pinned Hermes config
+   schema may warn that it is unrecognized even while the patched runtime reads it.
+   Confirm the actual status/session path instead of treating a saved value as proof.
    Default bridge URL: `http://127.0.0.1:8890`. Models/voice are configured under
    `voice.gpt_live.gemini`; inspect `integration/tools/voice_live.py` for the exact schema.
    The shipped historical model chain is not an availability guarantee: use models
