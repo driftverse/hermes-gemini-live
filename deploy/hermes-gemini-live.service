@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes Gemini Live WebRTC bridge (loopback only)
+After=network-online.target
+
+[Service]
+# EDIT these absolute paths before installation.
+WorkingDirectory=/absolute/path/to/hermes-gemini-live
+ExecStart=/absolute/path/to/hermes-gemini-live/.venv/bin/python /absolute/path/to/hermes-gemini-live/bridge/live_bridge.py
+EnvironmentFile=%h/.config/hermes-gemini-live/bridge.env
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

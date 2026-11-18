@@ -1,0 +1,2002 @@
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-voice.ts b/apps/desktop/src/app/chat/composer/hooks/use-composer-voice.ts
+index eadca6f..e0f8df5 100644
+--- a/apps/desktop/src/app/chat/composer/hooks/use-composer-voice.ts
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-voice.ts
+@@ -246,6 +246,18 @@ export function useComposerVoice({
+     busy,
+     consumePendingResponse,
+     enabled: voiceConversationActive && liveEngineActive,
++    // The whole Live model chain failed to start: keep the conversation open on the chained
++    // speech-to-text engine instead of dropping it.
++    onChainExhausted: () => {
++      notify({
++        id: 'voice-live-unavailable',
++        kind: 'warning',
++        message: t.notifications.voice.liveUnavailable('all Live models failed to start')
++      })
++      setLiveEngineActive(false)
++
++      return true
++    },
+     onFatalError: () => setVoiceConversationActive(false),
+     onInterrupt,
+     onStopWord: () => setVoiceConversationActive(false),
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts b/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts
+index 6d43c93..7e0c792 100644
+--- a/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts
++++ b/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts
+@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
+ 
+ import { useI18n } from '@/i18n'
+ import { sanitizeTextForSpeech } from '@/lib/speech-text'
+-import { type LiveHistoryMessage, type LiveTranscriptFragment, VoiceLiveSession } from '@/lib/voice-live'
++import {
++  fetchVoiceLiveStatus,
++  type LiveHistoryMessage,
++  type LiveTranscriptFragment,
++  type VoiceLiveProvider,
++  VoiceLiveSession
++} from '@/lib/voice-live'
++import { LiveChainExhaustedError } from '@/lib/voice-live-gemini'
+ import { isVoiceStopCommand } from '@/lib/voice-stop-word'
+ import { notify, notifyError } from '@/store/notifications'
+ 
+@@ -27,6 +34,9 @@ interface VoiceLiveConversationOptions {
+   busy: boolean
+   enabled: boolean
+   onFatalError?: () => void
++  /** Every Live model in the chain failed to start. Return true when the caller took over
++   *  (e.g. switched to the chained engine) so the generic fatal path is skipped. */
++  onChainExhausted?: () => boolean
+   /** Interrupt the in-flight Hermes turn (Stop-button seam). Fired when a new
+    *  delegation supersedes one still running. */
+   onInterrupt?: () => Promise<void> | void
+@@ -104,6 +114,7 @@ export function liveEndedMessage(
+ export function useVoiceLiveConversation({
+   busy,
+   enabled,
++  onChainExhausted,
+   onFatalError,
+   onInterrupt,
+   onStopWord,
+@@ -152,6 +163,7 @@ export function useVoiceLiveConversation({
+   const latest = useRef({
+     activeToolLabel,
+     beforeMicOpen,
++    onChainExhausted,
+     onFatalError,
+     onInterrupt,
+     onStopWord,
+@@ -164,6 +176,7 @@ export function useVoiceLiveConversation({
+   latest.current = {
+     activeToolLabel,
+     beforeMicOpen,
++    onChainExhausted,
+     onFatalError,
+     onInterrupt,
+     onStopWord,
+@@ -240,6 +253,15 @@ export function useVoiceLiveConversation({
+       // A wake-pause failure must not block an explicit start.
+     }
+ 
++    // Which transport the owner's profile selected (OpenAI WebRTC or Gemini WebSocket).
++    let provider: VoiceLiveProvider = 'openai'
++
++    try {
++      provider = (await fetchVoiceLiveStatus(ownerRef.current))?.provider ?? 'openai'
++    } catch {
++      // Keep the default; the session POST reports the real failure.
++    }
++
+     if (!enabledRef.current || startEpochRef.current !== epoch) {
+       startingRef.current = false
+ 
+@@ -291,12 +313,15 @@ export function useVoiceLiveConversation({
+             latest.current.onFatalError?.()
+           }
+         },
+-        onDelegation: (delegationId, context) => {
++        onDelegation: (delegationId, context, request) => {
+           if (sessionRef.current !== session) {
+             return
+           }
+ 
+-          const { context: voiceContext, prompt } = delegationPrompt(context)
++          const { context: voiceContext, prompt: heardPrompt } = delegationPrompt(context)
++          // Gemini sends the model's own clean statement of the request; prefer it over the
++          // raw (possibly partial) transcript of the last utterance.
++          const prompt = request?.replace(/\s+/g, ' ').trim() || heardPrompt
+ 
+           // A spoken stop command ends the conversation instead of becoming a turn.
+           if (prompt && isVoiceStopCommand(prompt)) {
+@@ -323,6 +348,7 @@ export function useVoiceLiveConversation({
+           void Promise.resolve(latest.current.onSubmit(prompt, voiceContext)).catch(error => {
+             notifyError(error, voiceCopy.liveDelegationFailed)
+             session.speak(delegationId, 'Sorry, I could not reach Hermes for that request.')
++            session.finishDelegation(delegationId)
+             setDelegation(null)
+             refreshStatus()
+           })
+@@ -336,7 +362,8 @@ export function useVoiceLiveConversation({
+           refreshStatus()
+         }
+       },
+-      ownerRef.current
++      ownerRef.current,
++      provider
+     )
+ 
+     sessionRef.current = session
+@@ -365,6 +392,13 @@ export function useVoiceLiveConversation({
+         return
+       }
+ 
++      // Every model in the Live chain failed to start: hand over to the chained engine.
++      if (error instanceof LiveChainExhaustedError && latest.current.onChainExhausted?.()) {
++        setStatus('idle')
++
++        return
++      }
++
+       // Only a mic DOMException gets the recorder's copy: this catch also
+       // takes non-mic start failures ('GPT-Live session already started',
+       // 'Missing local SDP offer', API errors) — those keep their own message.
+@@ -432,6 +466,7 @@ export function useVoiceLiveConversation({
+           spokenLengthRef.current = spoken.length
+         }
+ 
++        session.finishDelegation(delegationId)
+         latest.current.consumePendingResponse()
+         setDelegation(null)
+         refreshStatus()
+@@ -450,6 +485,8 @@ export function useVoiceLiveConversation({
+           session.think(delegationId, 'Hermes finished that request without a spoken result.')
+         }
+ 
++        session.finishDelegation(delegationId, 'Hermes finished that request without a spoken result.')
++
+         setDelegation(null)
+         refreshStatus()
+       }
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index 52014fa..3d0c0e0 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -477,7 +477,7 @@ export const en: Translations = {
+       liveEndedClosed: 'The live voice session was closed by the service.',
+       liveError: 'Live voice',
+       liveDelegationFailed: 'Could not hand the request to Hermes',
+-      liveUnavailable: reason => `GPT-Live voice chat is not available: ${reason}. Using speech-to-text instead.`
++      liveUnavailable: reason => `Live voice chat is not available: ${reason}. Using speech-to-text instead.`
+     },
+     native: {
+       approvalTitle: 'Approval needed',
+@@ -3379,11 +3379,11 @@ export const en: Translations = {
+     voiceControls: 'Voice',
+     voiceEngine: 'Voice chat engine',
+     voiceEngineChained: 'Speech-to-text + Hermes voice',
+-    voiceEngineLive: 'GPT-Live (full-duplex, delegates to Hermes)',
+-    voiceEngineLiveNeedsKey: 'Needs an OpenAI API key',
++    voiceEngineLive: 'Live (full-duplex, delegates to Hermes)',
++    voiceEngineLiveNeedsKey: 'Needs an API key for the Live provider',
+     voiceEngineChangeFailed: 'Could not change the voice chat engine',
+     voiceEngineChainedShort: 'speech-to-text',
+-    voiceEngineLiveShort: 'GPT-Live',
++    voiceEngineLiveShort: 'Live',
+     voiceDictation: 'Voice dictation',
+     speakReplies: 'Read replies aloud',
+     stopSpeakingReplies: 'Stop reading replies aloud',
+diff --git a/apps/desktop/src/lib/voice-live-gemini.test.ts b/apps/desktop/src/lib/voice-live-gemini.test.ts
+new file mode 100644
+index 0000000..6a4524a
+--- /dev/null
++++ b/apps/desktop/src/lib/voice-live-gemini.test.ts
+@@ -0,0 +1,345 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++import { type VoiceLiveHandlers, VoiceLiveSession } from './voice-live'
++import {
++  base64ToBytes,
++  bytesToBase64,
++  floatToPcm16,
++  GeminiLiveSession,
++  LiveChainExhaustedError,
++  pcm16ToFloat
++} from './voice-live-gemini'
++
++// ---- fakes ------------------------------------------------------------------------------------
++
++class FakeSocket {
++  static instances: FakeSocket[] = []
++  static OPEN = 1
++  static behaviour: Array<'close' | 'ok'> = []
++  readyState = 0
++  sent: Array<Record<string, any>> = []
++  private listeners: Record<string, Array<(event: any) => void>> = {}
++
++  constructor(public url: string) {
++    FakeSocket.instances.push(this)
++    const mode = FakeSocket.behaviour.shift() ?? 'ok'
++
++    queueMicrotask(() => {
++      if (mode === 'close') {
++        this.readyState = 3
++        this.emit('close', { code: 1011, reason: 'quota exhausted' })
++
++        return
++      }
++
++      this.readyState = 1
++      this.emit('open', {})
++    })
++  }
++
++  addEventListener(type: string, fn: (event: any) => void) {
++    ;(this.listeners[type] ??= []).push(fn)
++  }
++
++  emit(type: string, event: unknown) {
++    for (const fn of this.listeners[type] ?? []) {
++      fn(event)
++    }
++  }
++
++  send(data: string) {
++    const message = JSON.parse(data)
++    this.sent.push(message)
++
++    if (message.setup) {
++      queueMicrotask(() => this.serve({ setupComplete: {} }))
++    }
++  }
++
++  serve(message: unknown) {
++    this.emit('message', { data: JSON.stringify(message) })
++  }
++
++  close() {
++    this.readyState = 3
++  }
++}
++
++class FakeNode {
++  gain = { value: 1 }
++  onaudioprocess: ((event: unknown) => void) | null = null
++  connect() {
++    return this
++  }
++  disconnect() {}
++}
++
++class FakeSource {
++  static all: FakeSource[] = []
++  buffer: { duration: number } | null = null
++  onended: (() => void) | null = null
++  started: null | number = null
++  stopped = false
++  constructor() {
++    FakeSource.all.push(this)
++  }
++  connect() {}
++  start(at: number) {
++    this.started = at
++  }
++  stop() {
++    this.stopped = true
++  }
++}
++
++class FakeAudioContext {
++  currentTime = 0
++  destination = {}
++  constructor(public options: { sampleRate: number }) {}
++  get sampleRate() {
++    return this.options.sampleRate
++  }
++  createMediaStreamSource() {
++    return new FakeNode()
++  }
++  createScriptProcessor() {
++    return new FakeNode()
++  }
++  createGain() {
++    return new FakeNode()
++  }
++  createBuffer(_channels: number, length: number, rate: number) {
++    return { copyToChannel() {}, duration: length / rate }
++  }
++  createBufferSource() {
++    return new FakeSource()
++  }
++  async resume() {}
++  async close() {}
++}
++
++const SETUP_RESPONSE = (model: string, remaining: string[] = []) => ({
++  ok: true,
++  session: { model, provider: 'gemini' },
++  transport: { remaining, setup: { setup: { model: `models/${model}` } }, type: 'websocket', url: `wss://x/ws?access_token=t-${model}` }
++})
++
++function install(api: ReturnType<typeof vi.fn>) {
++  Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { api } })
++  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: FakeSocket })
++  Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: FakeAudioContext })
++  Object.defineProperty(window.navigator, 'mediaDevices', {
++    configurable: true,
++    value: { getUserMedia: async () => ({ getAudioTracks: () => [{ enabled: true }], getTracks: () => [{ stop() {} }] }) }
++  })
++}
++
++function handlers(over: Partial<VoiceLiveHandlers> = {}): VoiceLiveHandlers {
++  return { onClosed: vi.fn(), onDelegation: vi.fn(), onError: vi.fn(), ...over }
++}
++
++const tick = () => new Promise(resolve => setTimeout(resolve, 0))
++
++beforeEach(() => {
++  FakeSocket.instances = []
++  FakeSocket.behaviour = []
++  FakeSource.all = []
++})
++
++afterEach(() => {
++  Reflect.deleteProperty(window, 'hermesDesktop')
++  Reflect.deleteProperty(window.navigator, 'mediaDevices')
++})
++
++// ---- tests ------------------------------------------------------------------------------------
++
++describe('pcm helpers', () => {
++  it('round-trips base64 and pcm16, resampling by ratio', () => {
++    const bytes = new Uint8Array([0, 1, 2, 250, 255])
++    expect([...base64ToBytes(bytesToBase64(bytes))]).toEqual([...bytes])
++
++    const pcm = floatToPcm16(new Float32Array([0, 0.5, -0.5, 1, -1, 2]), 16_000, 16_000)
++    const back = pcm16ToFloat(pcm)
++    expect(back[1]).toBeCloseTo(0.5, 2)
++    expect(back[2]).toBeCloseTo(-0.5, 2)
++    expect(back[5]).toBeCloseTo(1, 2) // clamped
++
++    // 48 kHz → 16 kHz keeps one sample in three
++    expect(floatToPcm16(new Float32Array(48), 48_000).length).toBe(16 * 2)
++  })
++})
++
++describe('Gemini Live chain and delegation', () => {
++  it('moves down the chain, reporting each failed model, then answers a delegation', async () => {
++    // First two models close before setup (quota), the third connects.
++    FakeSocket.behaviour = ['close', 'close', 'ok']
++    const models = ['m1', 'm2', 'm3']
++
++    const api = vi.fn(async (request: any) => {
++      const failed: Array<{ model: string }> = request.body?.failed ?? []
++
++      return SETUP_RESPONSE(models[failed.length]!, models.slice(failed.length + 1))
++    })
++
++    install(api)
++
++    const onDelegation = vi.fn()
++    const session = new GeminiLiveSession(handlers({ onDelegation }), null)
++    await session.start([])
++
++    expect(api).toHaveBeenCalledTimes(3)
++    expect(api.mock.calls[0]![0].body.failed).toEqual([])
++    expect(api.mock.calls[1]![0].body.failed.map((f: any) => f.model)).toEqual(['m1'])
++    expect(api.mock.calls[2]![0].body.failed.map((f: any) => f.model)).toEqual(['m1', 'm2'])
++    expect(api.mock.calls[2]![0].body.failed[0].reason).toContain('1011')
++    expect(FakeSocket.instances).toHaveLength(3)
++    expect(session.connected).toBe(true)
++
++    // The renderer sends exactly the setup the gateway returned (key never involved).
++    expect(FakeSocket.instances[2]!.sent[0]).toEqual({ setup: { model: 'models/m3' } })
++    expect(FakeSocket.instances[2]!.url).toContain('access_token=')
++
++    // Transcript then a delegate_to_hermes call.
++    const socket = FakeSocket.instances[2]!
++    socket.serve({ serverContent: { inputTranscription: { text: 'what is free space' } } })
++    socket.serve({ toolCall: { functionCalls: [{ args: { request: 'How much disk space is free?' }, id: 'call-1', name: 'delegate_to_hermes' }] } })
++    await tick()
++
++    expect(onDelegation).toHaveBeenCalledTimes(1)
++    const [id, context, request] = onDelegation.mock.calls[0]!
++    expect(id).toBe('call-1')
++    expect(request).toBe('How much disk space is free?')
++    expect(context.map((f: any) => f.text).join('')).toContain('what is free space')
++
++    // Hermes streams sentences, then settles: ONE function response carries the whole reply.
++    session.speak('call-1', 'The disk is 29 percent full.')
++    session.speak('call-1', 'There are 643 gigabytes free.')
++    expect(socket.sent.some(m => m.toolResponse)).toBe(false)
++    session.finishDelegation('call-1')
++    const response = socket.sent.find(m => m.toolResponse)!.toolResponse.functionResponses[0]
++    expect(response).toEqual({
++      id: 'call-1',
++      name: 'delegate_to_hermes',
++      response: { result: 'The disk is 29 percent full. There are 643 gigabytes free.' }
++    })
++
++    // A second finish for the same id is ignored (no duplicate responses).
++    session.finishDelegation('call-1')
++    expect(socket.sent.filter(m => m.toolResponse)).toHaveLength(1)
++  })
++
++  it('throws LiveChainExhaustedError when the gateway says every model failed', async () => {
++    FakeSocket.behaviour = ['close']
++
++    const api = vi.fn(async (request: any) => {
++      if ((request.body?.failed ?? []).length) {
++        throw new Error('Every Gemini Live model failed to start: m1')
++      }
++
++      return SETUP_RESPONSE('m1')
++    })
++
++    install(api)
++
++    const session = new GeminiLiveSession(handlers(), null)
++    await expect(session.start([])).rejects.toBeInstanceOf(LiveChainExhaustedError)
++    expect(api).toHaveBeenCalledTimes(2)
++  })
++
++  it('plays model audio and drops the queue on barge-in', async () => {
++    const api = vi.fn(async () => SETUP_RESPONSE('m1'))
++    install(api)
++    const onSpeakingChange = vi.fn()
++    const session = new GeminiLiveSession(handlers({ onSpeakingChange }), null)
++    await session.start([])
++    const socket = FakeSocket.instances[0]!
++
++    const chunk = bytesToBase64(new Uint8Array(4800)) // 2400 samples = 100 ms at 24 kHz
++    socket.serve({ serverContent: { modelTurn: { parts: [{ inlineData: { data: chunk, mimeType: 'audio/pcm;rate=24000' } }] } } })
++    socket.serve({ serverContent: { modelTurn: { parts: [{ inlineData: { data: chunk, mimeType: 'audio/pcm;rate=24000' } }] } } })
++    await tick()
++
++    expect(FakeSource.all).toHaveLength(2)
++    expect(FakeSource.all[1]!.started!).toBeGreaterThan(FakeSource.all[0]!.started!) // queued back to back
++    expect(onSpeakingChange).toHaveBeenLastCalledWith(true)
++
++    socket.serve({ serverContent: { interrupted: true } })
++    await tick()
++    expect(FakeSource.all.every(source => source.stopped)).toBe(true)
++  })
++
++  it('ignores a delegation that the model cancelled, and mute stops sending audio', async () => {
++    const api = vi.fn(async () => SETUP_RESPONSE('m1'))
++    install(api)
++    const session = new GeminiLiveSession(handlers(), null)
++    await session.start([])
++    const socket = FakeSocket.instances[0]!
++
++    socket.serve({ toolCall: { functionCalls: [{ args: { request: 'x' }, id: 'c9', name: 'delegate_to_hermes' }] } })
++    await tick()
++    socket.serve({ toolCallCancellation: { ids: ['c9'] } })
++    await tick()
++    session.speak('c9', 'late')
++    session.finishDelegation('c9')
++    expect(socket.sent.some(m => m.toolResponse)).toBe(false)
++
++    session.setMuted(true)
++    expect(socket.sent.at(-1)).toEqual({ realtimeInput: { audioStreamEnd: true } })
++  })
++
++  it('answers an unknown function with an error instead of hanging the model', async () => {
++    const api = vi.fn(async () => SETUP_RESPONSE('m1'))
++    install(api)
++    const session = new GeminiLiveSession(handlers(), null)
++    await session.start([])
++    const socket = FakeSocket.instances[0]!
++    socket.serve({ toolCall: { functionCalls: [{ args: {}, id: 'u1', name: 'do_something_else' }] } })
++    await tick()
++    expect(socket.sent.at(-1)!.toolResponse.functionResponses[0].response.error).toBeTruthy()
++  })
++
++  it('resumes the same model with the saved handle after an unexpected close', async () => {
++    const api = vi.fn(async (request: any) => SETUP_RESPONSE(request.body?.model ?? 'm1'))
++    install(api)
++    const onClosed = vi.fn()
++    const session = new GeminiLiveSession(handlers({ onClosed }), null)
++    await session.start([])
++    const first = FakeSocket.instances[0]!
++    first.serve({ sessionResumptionUpdate: { newHandle: 'h-42', resumable: true } })
++    await tick()
++
++    first.readyState = 3
++    first.emit('close', { code: 1006, reason: '' })
++    await tick()
++    await tick()
++
++    const resume = api.mock.calls.at(-1)![0].body
++    expect(resume).toEqual({ model: 'm1', resume_handle: 'h-42' })
++    expect(FakeSocket.instances).toHaveLength(2)
++    expect(session.connected).toBe(true)
++    expect(onClosed).not.toHaveBeenCalled()
++  })
++
++  it('ends with connection_lost when it drops and there is nothing to resume', async () => {
++    const api = vi.fn(async () => SETUP_RESPONSE('m1'))
++    install(api)
++    const onClosed = vi.fn()
++    const session = new GeminiLiveSession(handlers({ onClosed }), null)
++    await session.start([])
++    const first = FakeSocket.instances[0]!
++    first.readyState = 3
++    first.emit('close', { code: 1006, reason: '' })
++    await tick()
++    expect(onClosed).toHaveBeenCalledWith('connection_lost', expect.any(Number))
++  })
++
++  it('VoiceLiveSession picks the Gemini transport from the provider hint', async () => {
++    const api = vi.fn(async () => SETUP_RESPONSE('m1'))
++    install(api)
++    const session = new VoiceLiveSession(handlers(), null, 'gemini')
++    await session.start([])
++    expect(FakeSocket.instances).toHaveLength(1)
++    expect(session.connected).toBe(true)
++    session.close()
++  })
++})
+diff --git a/apps/desktop/src/lib/voice-live-gemini.ts b/apps/desktop/src/lib/voice-live-gemini.ts
+new file mode 100644
+index 0000000..ea0644b
+--- /dev/null
++++ b/apps/desktop/src/lib/voice-live-gemini.ts
+@@ -0,0 +1,661 @@
++import { type OwnerScope, ownerScoped } from '@/api/client'
++import { hermesApi } from '@/hermes'
++
++import type { LiveHistoryMessage, LiveTranscriptFragment, LiveVoiceSession, VoiceLiveHandlers } from './voice-live'
++
++/**
++ * Gemini Live transport for the app's Live mode (`voice.gpt_live.provider: gemini`).
++ *
++ * Same contract as the OpenAI transport (`lib/voice-live.ts`): the voice model owns the mic and
++ * the speaker and hands real work to Hermes. Differences this file absorbs:
++ *
++ * - Transport is a WebSocket the renderer opens itself, with a SINGLE-USE EPHEMERAL TOKEN minted
++ *   by the gateway (`tools/voice_live.py`). The Google API key never reaches the renderer.
++ * - The gateway picks the model. A model that fails to start is reported back and the next one
++ *   in the configured chain is dialed; when the whole chain fails the caller falls back to the
++ *   chained speech-to-text engine (`LiveChainExhaustedError`).
++ * - Audio is raw PCM: 16 kHz mono in, 24 kHz mono out. Barge-in arrives as `interrupted`.
++ * - Delegation is one blocking function call, `delegate_to_hermes(request)`. It is answered with
++ *   the text of Hermes' reply once the turn settles (`finishDelegation`).
++ * - Dropped connections and `goAway` re-dial the same model with the session-resumption handle.
++ */
++
++export class LiveChainExhaustedError extends Error {
++  constructor(message: string) {
++    super(message)
++    this.name = 'LiveChainExhaustedError'
++  }
++}
++
++interface GeminiTransport {
++  remaining?: string[]
++  setup: Record<string, unknown>
++  type: string
++  url: string
++}
++
++interface GeminiSessionResponse {
++  ok: boolean
++  session?: { model?: string; provider?: string }
++  transport?: GeminiTransport
++}
++
++interface GeminiMessage {
++  goAway?: { timeLeft?: string }
++  serverContent?: {
++    inputTranscription?: { text?: string }
++    interrupted?: boolean
++    modelTurn?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string } }> }
++    outputTranscription?: { text?: string }
++    turnComplete?: boolean
++  }
++  sessionResumptionUpdate?: { newHandle?: string; resumable?: boolean }
++  setupComplete?: Record<string, unknown>
++  toolCall?: { functionCalls?: Array<{ args?: { request?: string }; id: string; name: string }> }
++  toolCallCancellation?: { ids?: string[] }
++  error?: { message?: string }
++}
++
++const DELEGATE_FUNCTION = 'delegate_to_hermes'
++const INPUT_RATE = 16_000
++const OUTPUT_RATE = 24_000
++const SETUP_TIMEOUT_MS = 12_000
++const MAX_START_ATTEMPTS = 8
++const CONTEXT_WINDOW_MS = 5 * 60_000
++const CONTEXT_MAX_FRAGMENTS = 80
++const RESULT_CHAR_LIMIT = 6_000
++const SPEAKING_TAIL_MS = 250
++
++export function bytesToBase64(bytes: Uint8Array): string {
++  let binary = ''
++  const step = 0x8000
++
++  for (let index = 0; index < bytes.length; index += step) {
++    binary += String.fromCharCode(...bytes.subarray(index, index + step))
++  }
++
++  return btoa(binary)
++}
++
++export function base64ToBytes(data: string): Uint8Array {
++  const binary = atob(data)
++  const bytes = new Uint8Array(binary.length)
++
++  for (let index = 0; index < binary.length; index += 1) {
++    bytes[index] = binary.charCodeAt(index)
++  }
++
++  return bytes
++}
++
++/** Float32 [-1, 1] → little-endian PCM16, resampled by decimation/linear interpolation when the
++ *  context rate differs from the 16 kHz the API expects. */
++export function floatToPcm16(input: Float32Array, fromRate: number, toRate = INPUT_RATE): Uint8Array {
++  const ratio = fromRate / toRate
++  const length = Math.max(0, Math.floor(input.length / ratio))
++  const out = new Int16Array(length)
++
++  for (let index = 0; index < length; index += 1) {
++    const position = index * ratio
++    const lower = Math.floor(position)
++    const upper = Math.min(lower + 1, input.length - 1)
++    const sample = input[lower]! + (input[upper]! - input[lower]!) * (position - lower)
++    const clamped = Math.max(-1, Math.min(1, sample))
++    out[index] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff
++  }
++
++  return new Uint8Array(out.buffer)
++}
++
++export function pcm16ToFloat(bytes: Uint8Array): Float32Array {
++  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
++  const out = new Float32Array(Math.floor(bytes.byteLength / 2))
++
++  for (let index = 0; index < out.length; index += 1) {
++    out[index] = view.getInt16(index * 2, true) / 0x8000
++  }
++
++  return out
++}
++
++export class GeminiLiveSession implements LiveVoiceSession {
++  private readonly owner: null | OwnerScope
++  private readonly handlers: VoiceLiveHandlers
++  private socket: null | WebSocket = null
++  private model = ''
++  private resumeHandle: null | string = null
++  private ready = false
++  private finalized = false
++  private reconnecting = false
++  private muted = false
++  private startedAt = 0
++  private transcript: LiveTranscriptFragment[] = []
++  private pending = new Set<string>()
++  private buffers = new Map<string, string[]>()
++  private microphone: null | MediaStream = null
++  private inputContext: null | AudioContext = null
++  private processor: null | ScriptProcessorNode = null
++  private micSource: null | MediaStreamAudioSourceNode = null
++  private outputContext: null | AudioContext = null
++  private nextPlayTime = 0
++  private playing = new Set<AudioBufferSourceNode>()
++  private speaking = false
++  private speakingTimer: null | number = null
++  sessionId: null | string = null
++  activeDelegationId: null | string = null
++
++  constructor(handlers: VoiceLiveHandlers, owner: null | OwnerScope = null) {
++    this.handlers = handlers
++    this.owner = owner
++  }
++
++  get connected(): boolean {
++    return this.ready && this.socket?.readyState === WebSocket.OPEN
++  }
++
++  contextWindow(): LiveTranscriptFragment[] {
++    const last = this.transcript.at(-1)
++
++    if (!last) {
++      return []
++    }
++
++    const floor = last.endMs - CONTEXT_WINDOW_MS
++
++    return this.transcript.filter(fragment => fragment.endMs >= floor).slice(-CONTEXT_MAX_FRAGMENTS)
++  }
++
++  async start(history: LiveHistoryMessage[]): Promise<void> {
++    if (this.socket || this.startedAt) {
++      throw new Error('Live session already started')
++    }
++
++    if (!navigator.mediaDevices?.getUserMedia) {
++      throw new DOMException('Microphone capture is unavailable here', 'NotSupportedError')
++    }
++
++    this.startedAt = Date.now()
++
++    // Mic first: the permission prompt must not eat into the per-model connect timeout.
++    this.microphone = await navigator.mediaDevices.getUserMedia({
++      audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true }
++    })
++
++    this.outputContext = new AudioContext({ sampleRate: OUTPUT_RATE })
++    void this.outputContext.resume().catch(() => undefined)
++
++    const failed: Array<{ model: string; reason: string }> = []
++
++    for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt += 1) {
++      let response: GeminiSessionResponse
++
++      try {
++        response = await this.requestSession({ failed: [...failed], history })
++      } catch (error) {
++        // Once models have failed, a refusal from the gateway means the chain is spent.
++        if (failed.length && !(error instanceof LiveChainExhaustedError)) {
++          throw new LiveChainExhaustedError(error instanceof Error ? error.message : String(error))
++        }
++
++        throw error
++      }
++
++      const transport = response.transport
++      this.model = response.session?.model ?? ''
++
++      if (!transport?.url || !transport.setup) {
++        throw new Error('Live session creation failed')
++      }
++
++      try {
++        await this.openSocket(transport)
++        this.armMicrophone()
++
++        return
++      } catch (error) {
++        if (this.finalized) {
++          return
++        }
++
++        failed.push({ model: this.model, reason: error instanceof Error ? error.message : String(error) })
++        this.socket = null
++        this.ready = false
++      }
++    }
++
++    throw new LiveChainExhaustedError(`Live models failed to start: ${failed.map(f => f.model).join(', ')}`)
++  }
++
++  private async requestSession(body: {
++    failed?: Array<{ model: string; reason: string }>
++    history?: LiveHistoryMessage[]
++    model?: string
++    resume_handle?: string
++  }): Promise<GeminiSessionResponse> {
++    try {
++      const response = await hermesApi<GeminiSessionResponse>({
++        ...ownerScoped(this.owner ?? undefined),
++        body,
++        method: 'POST',
++        path: '/api/audio/voice-live/session',
++        timeoutMs: 45_000
++      })
++
++      if (!response?.ok) {
++        throw new Error('Live session creation failed')
++      }
++
++      return response
++    } catch (error) {
++      const message = error instanceof Error ? error.message : String(error)
++
++      if (/every gemini live model failed/i.test(message)) {
++        throw new LiveChainExhaustedError(message)
++      }
++
++      throw error
++    }
++  }
++
++  /** Dial one model: resolves once `setupComplete` arrives, rejects on close/error/timeout. */
++  private openSocket(transport: GeminiTransport): Promise<void> {
++    return new Promise<void>((resolve, reject) => {
++      const socket = new WebSocket(transport.url)
++      this.socket = socket
++      this.ready = false
++      let settled = false
++
++      const fail = (reason: string) => {
++        if (settled) {
++          return
++        }
++
++        settled = true
++        window.clearTimeout(timer)
++
++        try {
++          socket.close()
++        } catch {
++          // already closed
++        }
++
++        reject(new Error(reason))
++      }
++
++      const timer = window.setTimeout(() => fail('timed out waiting for setup'), SETUP_TIMEOUT_MS)
++
++      socket.addEventListener('open', () => socket.send(JSON.stringify(transport.setup)))
++      socket.addEventListener('error', () => fail('socket error'))
++      socket.addEventListener('close', event => {
++        if (!settled) {
++          fail(`closed ${event.code} ${event.reason}`.trim())
++
++          return
++        }
++
++        if (this.socket === socket) {
++          this.onSocketClosed(event.code, event.reason)
++        }
++      })
++      socket.addEventListener('message', event => {
++        void this.decode(event.data).then(message => {
++          if (!message || this.socket !== socket) {
++            return
++          }
++
++          if (message.setupComplete && !settled) {
++            settled = true
++            window.clearTimeout(timer)
++            this.ready = true
++            resolve()
++
++            return
++          }
++
++          this.handleMessage(message)
++        })
++      })
++    })
++  }
++
++  private async decode(data: unknown): Promise<GeminiMessage | null> {
++    try {
++      const text = typeof data === 'string' ? data : data instanceof Blob ? await data.text() : ''
++
++      return text ? (JSON.parse(text) as GeminiMessage) : null
++    } catch {
++      return null
++    }
++  }
++
++  private send(message: Record<string, unknown>): boolean {
++    if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.ready) {
++      return false
++    }
++
++    this.socket.send(JSON.stringify(message))
++
++    return true
++  }
++
++  private armMicrophone(): void {
++    if (!this.microphone || this.processor) {
++      return
++    }
++
++    // ScriptProcessor, not an AudioWorklet: no worker/blob script, so no CSP surface to open.
++    const context = new AudioContext({ sampleRate: INPUT_RATE })
++    this.inputContext = context
++    this.micSource = context.createMediaStreamSource(this.microphone)
++    const processor = context.createScriptProcessor(2048, 1, 1)
++    this.processor = processor
++    const silence = context.createGain()
++    silence.gain.value = 0
++
++    processor.onaudioprocess = event => {
++      if (this.muted || !this.connected) {
++        return
++      }
++
++      const pcm = floatToPcm16(event.inputBuffer.getChannelData(0), context.sampleRate)
++
++      if (pcm.length) {
++        this.send({ realtimeInput: { audio: { data: bytesToBase64(pcm), mimeType: `audio/pcm;rate=${INPUT_RATE}` } } })
++      }
++    }
++
++    this.micSource.connect(processor)
++    processor.connect(silence)
++    silence.connect(context.destination)
++    void context.resume().catch(() => undefined)
++  }
++
++  private elapsed(): number {
++    return Date.now() - this.startedAt
++  }
++
++  private addFragment(speaker: 'assistant' | 'user', text: string): void {
++    if (!text) {
++      return
++    }
++
++    const now = this.elapsed()
++    const fragment: LiveTranscriptFragment = { endMs: now, speaker, startMs: now, text }
++    this.transcript.push(fragment)
++
++    if (this.transcript.length > 2_000) {
++      this.transcript.splice(0, this.transcript.length - 1_500)
++    }
++
++    this.handlers.onTranscript?.(fragment)
++  }
++
++  private handleMessage(message: GeminiMessage): void {
++    if (message.sessionResumptionUpdate?.newHandle && message.sessionResumptionUpdate.resumable !== false) {
++      this.resumeHandle = message.sessionResumptionUpdate.newHandle
++    }
++
++    if (message.goAway) {
++      void this.reconnect('go_away')
++    }
++
++    const content = message.serverContent
++
++    if (content) {
++      if (content.interrupted) {
++        this.stopPlayback()
++      }
++
++      for (const part of content.modelTurn?.parts ?? []) {
++        if (part.inlineData?.data) {
++          this.enqueueAudio(base64ToBytes(part.inlineData.data))
++        }
++      }
++
++      this.addFragment('user', content.inputTranscription?.text ?? '')
++      this.addFragment('assistant', content.outputTranscription?.text ?? '')
++    }
++
++    for (const call of message.toolCall?.functionCalls ?? []) {
++      if (call.name !== DELEGATE_FUNCTION) {
++        this.send({
++          toolResponse: { functionResponses: [{ id: call.id, name: call.name, response: { error: 'Unknown function' } }] }
++        })
++
++        continue
++      }
++
++      this.pending.add(call.id)
++      this.activeDelegationId = call.id
++      this.handlers.onDelegation(call.id, this.contextWindow(), call.args?.request ?? '')
++    }
++
++    for (const id of message.toolCallCancellation?.ids ?? []) {
++      this.pending.delete(id)
++      this.buffers.delete(id)
++
++      if (this.activeDelegationId === id) {
++        this.activeDelegationId = null
++      }
++    }
++
++    if (message.error?.message) {
++      this.handlers.onError(message.error.message, false)
++    }
++  }
++
++  // ---- playback ----------------------------------------------------------------------------
++
++  private enqueueAudio(bytes: Uint8Array): void {
++    const context = this.outputContext
++
++    if (!context || !bytes.length) {
++      return
++    }
++
++    const samples = pcm16ToFloat(bytes)
++    const buffer = context.createBuffer(1, samples.length, OUTPUT_RATE)
++    buffer.copyToChannel(samples as Float32Array<ArrayBuffer>, 0)
++    const source = context.createBufferSource()
++    source.buffer = buffer
++    source.connect(context.destination)
++    const startAt = Math.max(context.currentTime + 0.03, this.nextPlayTime)
++    source.start(startAt)
++    this.nextPlayTime = startAt + buffer.duration
++    this.playing.add(source)
++    this.setSpeaking(true)
++
++    source.onended = () => {
++      this.playing.delete(source)
++
++      if (!this.playing.size) {
++        this.scheduleSpeakingOff()
++      }
++    }
++  }
++
++  /** Barge-in: drop everything queued so the voice stops at once. */
++  private stopPlayback(): void {
++    for (const source of this.playing) {
++      source.onended = null
++
++      try {
++        source.stop()
++      } catch {
++        // not started / already stopped
++      }
++    }
++
++    this.playing.clear()
++    this.nextPlayTime = 0
++    this.scheduleSpeakingOff()
++  }
++
++  private setSpeaking(speaking: boolean): void {
++    if (this.speakingTimer) {
++      window.clearTimeout(this.speakingTimer)
++      this.speakingTimer = null
++    }
++
++    if (speaking !== this.speaking) {
++      this.speaking = speaking
++      this.handlers.onSpeakingChange?.(speaking)
++    }
++  }
++
++  private scheduleSpeakingOff(): void {
++    if (this.speakingTimer) {
++      window.clearTimeout(this.speakingTimer)
++    }
++
++    this.speakingTimer = window.setTimeout(() => {
++      this.speakingTimer = null
++
++      if (!this.playing.size) {
++        this.setSpeaking(false)
++      }
++    }, SPEAKING_TAIL_MS)
++  }
++
++  // ---- reconnect ---------------------------------------------------------------------------
++
++  private onSocketClosed(code: number, reason: string): void {
++    if (this.finalized) {
++      return
++    }
++
++    this.ready = false
++    void this.reconnect(`closed ${code} ${reason}`.trim())
++  }
++
++  /** Re-dial the same model with the resumption handle; one try, then the session ends. */
++  private async reconnect(why: string): Promise<void> {
++    if (this.finalized || this.reconnecting) {
++      return
++    }
++
++    if (!this.resumeHandle || !this.model) {
++      this.finish(why.startsWith('closed') ? 'connection_lost' : why, null)
++
++      return
++    }
++
++    this.reconnecting = true
++    const previous = this.socket
++
++    try {
++      const response = await this.requestSession({ model: this.model, resume_handle: this.resumeHandle })
++
++      if (!response.transport) {
++        throw new Error('no transport')
++      }
++
++      this.socket = null
++      await this.openSocket(response.transport)
++      previous?.close()
++    } catch {
++      previous?.close()
++      this.finish('connection_lost', null)
++    } finally {
++      this.reconnecting = false
++    }
++  }
++
++  // ---- LiveVoiceSession ---------------------------------------------------------------------
++
++  /** Quiet progress is not a thing in a blocking function call; kept so the hook is engine-agnostic. */
++  think(): void {
++    // Intentionally empty.
++  }
++
++  speak(delegationId: null | string, content: string): void {
++    if (!delegationId || !content.trim()) {
++      return
++    }
++
++    const chunks = this.buffers.get(delegationId) ?? []
++    chunks.push(content.trim())
++    this.buffers.set(delegationId, chunks)
++  }
++
++  finishDelegation(delegationId: null | string, fallback = ''): void {
++    if (!delegationId || !this.pending.has(delegationId)) {
++      return
++    }
++
++    const text = (this.buffers.get(delegationId) ?? []).join(' ').trim() || fallback.trim()
++    this.buffers.delete(delegationId)
++    this.pending.delete(delegationId)
++
++    if (this.activeDelegationId === delegationId) {
++      this.activeDelegationId = null
++    }
++
++    this.send({
++      toolResponse: {
++        functionResponses: [
++          {
++            id: delegationId,
++            name: DELEGATE_FUNCTION,
++            response: { result: (text || 'Hermes finished that request without anything to report.').slice(0, RESULT_CHAR_LIMIT) }
++          }
++        ]
++      }
++    })
++  }
++
++  instruct(): void {
++    // The model detects end of speech itself (server VAD); there is nothing to nudge.
++  }
++
++  setMuted(muted: boolean): void {
++    this.muted = muted
++
++    for (const track of this.microphone?.getAudioTracks() ?? []) {
++      track.enabled = !muted
++    }
++
++    if (muted) {
++      this.send({ realtimeInput: { audioStreamEnd: true } })
++    }
++  }
++
++  close(): void {
++    this.finish('close_requested', null)
++  }
++
++  private finish(reason: string, usageSeconds: null | number): void {
++    if (this.finalized) {
++      return
++    }
++
++    this.finalized = true
++    this.ready = false
++
++    if (this.speakingTimer) {
++      window.clearTimeout(this.speakingTimer)
++      this.speakingTimer = null
++    }
++
++    this.stopPlayback()
++    this.processor?.disconnect()
++
++    if (this.processor) {
++      this.processor.onaudioprocess = null
++    }
++
++    this.micSource?.disconnect()
++    void this.inputContext?.close().catch(() => undefined)
++    void this.outputContext?.close().catch(() => undefined)
++    this.microphone?.getTracks().forEach(track => track.stop())
++
++    try {
++      this.socket?.close(1000)
++    } catch {
++      // already closed
++    }
++
++    const seconds = usageSeconds ?? (this.startedAt ? Math.round(this.elapsed() / 1000) : null)
++    this.handlers.onClosed(reason, reason === 'close_requested' ? null : seconds)
++  }
++}
+diff --git a/apps/desktop/src/lib/voice-live.ts b/apps/desktop/src/lib/voice-live.ts
+index 6bd9406..f01d3f9 100644
+--- a/apps/desktop/src/lib/voice-live.ts
++++ b/apps/desktop/src/lib/voice-live.ts
+@@ -1,6 +1,8 @@
+ import { type OwnerScope, ownerScoped, profileScoped } from '@/api/client'
+ import { hermesApi } from '@/hermes'
+ 
++import { GeminiLiveSession } from './voice-live-gemini'
++
+ /**
+  * GPT-Live voice chat: the full-duplex voice frontend that DELEGATES to Hermes.
+  *
+@@ -21,14 +23,33 @@ import { hermesApi } from '@/hermes'
+ 
+ export type VoiceChatMode = 'chained' | 'gpt-live'
+ 
++export type VoiceLiveProvider = 'gemini' | 'openai'
++
+ export interface VoiceLiveStatus {
+   mode: VoiceChatMode
+   available: boolean
+   reason: null | string
+   model: string
++  models?: string[]
++  provider?: VoiceLiveProvider
+   voice: string
+ }
+ 
++/** What the conversation hook drives. Both transports (OpenAI WebRTC, Gemini WebSocket) implement it. */
++export interface LiveVoiceSession {
++  activeDelegationId: null | string
++  readonly connected: boolean
++  sessionId: null | string
++  close(): void
++  /** The reply for a delegation is complete; transports that answer a function call send it now. */
++  finishDelegation(delegationId: null | string, fallback?: string): void
++  instruct(content: string): void
++  setMuted(muted: boolean): void
++  speak(delegationId: null | string, content: string): void
++  start(history: LiveHistoryMessage[]): Promise<void>
++  think(delegationId: null | string, content: string): void
++}
++
+ export interface LiveHistoryMessage {
+   type: 'message'
+   role: 'assistant' | 'developer' | 'user'
+@@ -59,7 +80,7 @@ export interface LiveTranscriptFragment {
+ export interface VoiceLiveHandlers {
+   /** GPT-Live asked the backend (Hermes) for help. `context` is the recent
+    *  transcript window, newest last — the delegation itself carries no text. */
+-  onDelegation: (delegationId: string, context: LiveTranscriptFragment[]) => void
++  onDelegation: (delegationId: string, context: LiveTranscriptFragment[], request?: string) => void
+   /** Vendor-side error. `fatal` when the session is gone. */
+   onError: (message: string, fatal: boolean) => void
+   /** `session.closed` arrived (or the transport dropped without it). */
+@@ -78,10 +99,10 @@ const APPEND_CHAR_LIMIT = 1_400
+ const CONTEXT_WINDOW_MS = 5 * 60_000
+ const CONTEXT_MAX_FRAGMENTS = 80
+ 
+-export async function fetchVoiceLiveStatus(): Promise<null | VoiceLiveStatus> {
++export async function fetchVoiceLiveStatus(owner?: null | OwnerScope): Promise<null | VoiceLiveStatus> {
+   try {
+     const response = await hermesApi<{ ok: boolean } & VoiceLiveStatus>({
+-      ...profileScoped(),
++      ...(owner ? ownerScoped(owner) : profileScoped()),
+       path: '/api/audio/voice-live/status'
+     })
+ 
+@@ -93,6 +114,8 @@ export async function fetchVoiceLiveStatus(): Promise<null | VoiceLiveStatus> {
+       available: Boolean(response.available),
+       mode: response.mode === 'gpt-live' ? 'gpt-live' : 'chained',
+       model: response.model,
++      ...(Array.isArray(response.models) ? { models: response.models } : {}),
++      provider: response.provider === 'gemini' ? 'gemini' : 'openai',
+       reason: response.reason ?? null,
+       voice: response.voice
+     }
+@@ -211,7 +234,8 @@ async function waitForIceGathering(connection: RTCPeerConnection): Promise<void>
+   })
+ }
+ 
+-export class VoiceLiveSession {
++/** OpenAI `gpt-live-1` over WebRTC. */
++export class OpenAiLiveSession implements LiveVoiceSession {
+   readonly audio: HTMLAudioElement
+   /** Whose (connection, profile) this session dials; null → the active scope.
+    *  A Bot chat runs its GPT-Live session on the Bot's own profile, so the
+@@ -480,6 +504,11 @@ export class VoiceLiveSession {
+     }
+   }
+ 
++  /** OpenAI streams the reply with `speak`; there is no function result to send. */
++  finishDelegation(): void {
++    // Intentionally empty.
++  }
++
+   /** Steer the live persona mid-conversation (session-wide). */
+   instruct(content: string): void {
+     const text = content.trim().slice(0, APPEND_CHAR_LIMIT)
+@@ -547,3 +576,64 @@ export class VoiceLiveSession {
+     this.handlers.onClosed(reason, usageSeconds)
+   }
+ }
++
++/**
++ * The session the conversation hook creates. `provider` is what the gateway reports for the
++ * owner's profile (`voice.gpt_live.provider`); the hook looks it up before constructing this.
++ */
++export class VoiceLiveSession implements LiveVoiceSession {
++  private readonly impl: LiveVoiceSession
++
++  constructor(handlers: VoiceLiveHandlers, owner: null | OwnerScope = null, provider: VoiceLiveProvider = 'openai') {
++    this.impl =
++      provider === 'gemini' ? new GeminiLiveSession(handlers, owner) : new OpenAiLiveSession(handlers, owner)
++  }
++
++  get connected(): boolean {
++    return this.impl.connected
++  }
++
++  get sessionId(): null | string {
++    return this.impl.sessionId
++  }
++
++  set sessionId(value: null | string) {
++    this.impl.sessionId = value
++  }
++
++  get activeDelegationId(): null | string {
++    return this.impl.activeDelegationId
++  }
++
++  set activeDelegationId(value: null | string) {
++    this.impl.activeDelegationId = value
++  }
++
++  start(history: LiveHistoryMessage[]): Promise<void> {
++    return this.impl.start(history)
++  }
++
++  think(delegationId: null | string, content: string): void {
++    this.impl.think(delegationId, content)
++  }
++
++  speak(delegationId: null | string, content: string): void {
++    this.impl.speak(delegationId, content)
++  }
++
++  finishDelegation(delegationId: null | string, fallback?: string): void {
++    this.impl.finishDelegation(delegationId, fallback)
++  }
++
++  instruct(content: string): void {
++    this.impl.instruct(content)
++  }
++
++  setMuted(muted: boolean): void {
++    this.impl.setMuted(muted)
++  }
++
++  close(): void {
++    this.impl.close()
++  }
++}
+diff --git a/hermes_cli/web_models.py b/hermes_cli/web_models.py
+index ae75bae..694e086 100644
+--- a/hermes_cli/web_models.py
++++ b/hermes_cli/web_models.py
+@@ -248,10 +248,15 @@ class TTSSpeakRequest(BaseModel):
+     text: str
+ 
+ class VoiceLiveSessionRequest(BaseModel):
+-    """POST /api/audio/voice-live/session: the renderer's WebRTC SDP offer plus optional prior
+-    text turns (``{"type":"message","role":..,"content":[..]}``) to seed the live voice model."""
+-    sdp: str
++    """POST /api/audio/voice-live/session. OpenAI provider: the renderer's WebRTC SDP offer plus
++    optional prior text turns (``{"type":"message","role":..,"content":[..]}``). Gemini provider:
++    no SDP; ``failed`` lists models that already failed to start in this attempt, ``model`` +
++    ``resume_handle`` re-dial one model after a dropped connection."""
++    sdp: str = ""
+     history: Optional[list[dict[str, Any]]] = None
++    failed: Optional[list[dict[str, Any]]] = None
++    model: Optional[str] = None
++    resume_handle: Optional[str] = None
+ 
+ class TTSLeaseRequest(BaseModel):
+     """POST /api/audio/tts-lease: ``lease`` names the toggle/surface holding the lease
+diff --git a/hermes_cli/web_routers/audio.py b/hermes_cli/web_routers/audio.py
+index af1eb3d..03c6684 100644
+--- a/hermes_cli/web_routers/audio.py
++++ b/hermes_cli/web_routers/audio.py
+@@ -16,7 +16,7 @@ import json
+ import os
+ import urllib.parse
+ import urllib.request
+-from fastapi import APIRouter
++from fastapi import APIRouter, Request
+ from hermes_cli.dashboard_auth.native_http import grant_home_scope
+ from hermes_cli.web_routers._common import client_error, http_failure
+ from hermes_cli.web_deps import late
+@@ -35,6 +35,8 @@ from hermes_cli.web_models import (
+ from typing import Any, Dict, Optional
+ 
+ _log = logging.getLogger("hermes_cli.web_server")
++
++
+ router = APIRouter()
+ 
+ # Late-bound so a test's monkeypatch on the owning module wins at call time.
+@@ -181,24 +183,49 @@ async def get_client_voice_config(request: Request, profile: Optional[str] = Non
+ 
+ 
+ @router.get("/api/audio/voice-live/status")
+-async def get_voice_live_status(profile: Optional[str] = None):
++async def get_voice_live_status(request: Request, profile: Optional[str] = None):
+     """Which voice chat mode the profile selected (``chained`` | ``gpt-live``) and whether GPT-Live
+     can start. Non-secret: the desktop decides which conversation engine to mount from this."""
+     from tools.voice_live import resolve_gpt_live_status
++    # Only the Electron desktop understands the Gemini-direct shape; every other client (the phone
++    # app, browsers) gets the OpenAI-era fields and is served through the WebRTC bridge.
++    desktop = "electron" in (request.headers.get("user-agent") or "").lower()
+     with http_failure("GPT-Live status resolution failed", 500, "GPT-Live status failed"):
+-        result = await _run_config_scoped(profile, resolve_gpt_live_status)
++        result = await _run_config_scoped(profile, lambda: resolve_gpt_live_status(openai_shape=not desktop))
+     return {"ok": True, **result}
+ 
+ 
+ @router.post("/api/audio/voice-live/session")
+-async def create_voice_live_session(payload: VoiceLiveSessionRequest, profile: Optional[str] = None):
++async def create_voice_live_session(request: Request, payload: VoiceLiveSessionRequest, profile: Optional[str] = None):
+     """Exchange the renderer's WebRTC SDP offer for a GPT-Live session answer.
+ 
+     The project API key stays on this host; the renderer only receives the session id and the
+     SDP answer. Client delegation is fixed at creation: every ``session.delegation.created`` the
+     renderer receives becomes a Hermes turn on the session it belongs to.
+     """
+-    from tools.voice_live import create_webrtc_session
++    from tools.voice_live import (
++        GEMINI_PROVIDER, create_gemini_bridge_session, create_gemini_session, create_webrtc_session, live_provider,
++    )
++    # Provider is read inside the profile scope, like the session creation itself.
++    if await _run_config_scoped(profile, live_provider) == GEMINI_PROVIDER:
++        if (payload.sdp or "").strip():
++            # An OpenAI-contract client (WebRTC offer): answer through the local bridge.
++            try:
++                result = await _run_config_scoped(profile, lambda: create_gemini_bridge_session(
++                    payload.sdp, payload.history))
++            except ValueError as exc:
++                raise HTTPException(status_code=503, detail=str(exc))
++            except RuntimeError as exc:
++                raise HTTPException(status_code=502, detail=str(exc))
++            return {"ok": True, **result}
++        try:
++            result = await _run_config_scoped(profile, lambda: create_gemini_session(
++                payload.history, payload.failed, payload.model, payload.resume_handle))
++        except ValueError as exc:
++            raise HTTPException(status_code=503, detail=str(exc))
++        except RuntimeError as exc:
++            raise HTTPException(status_code=502, detail=str(exc))
++        return {"ok": True, **result}
+     # Validate emptiness only: the vendor's SDP parser needs the offer byte-exact, including the
+     # trailing CRLF (a stripped offer answers 400 "failed to unmarshal SDP: EOF").
+     sdp = payload.sdp or ""
+diff --git a/tests/tools/test_voice_live_gemini.py b/tests/tools/test_voice_live_gemini.py
+new file mode 100644
+index 0000000..d4c87ae
+--- /dev/null
++++ b/tests/tools/test_voice_live_gemini.py
+@@ -0,0 +1,150 @@
++"""Gemini Live provider for the app's Live mode: model chain, cooldown, status, setup message.
++
++stdlib unittest on purpose (also collected by pytest). No network: the token mint is patched.
++"""
++
++import unittest
++from unittest import mock
++
++from tools import voice_live as vl
++
++
++def _voice(**gemini):
++    return {"voice_chat_mode": "gpt-live", "gpt_live": {"provider": "gemini", "gemini": gemini}}
++
++
++class GeminiChain(unittest.TestCase):
++    def setUp(self):
++        vl._cooldowns.clear()
++        self.minted = mock.patch.object(vl, "_mint_gemini_token", return_value="tok123").start()
++        self.key = mock.patch.object(vl, "_resolve_gemini_key", return_value="k").start()
++        self.addCleanup(mock.patch.stopall)
++
++    def _session(self, voice, **kwargs):
++        with mock.patch.object(vl, "_voice_section", return_value=voice):
++            return vl.create_gemini_session(**kwargs)
++
++    def test_default_chain_has_four_delegating_models_and_picks_first(self):
++        out = self._session(_voice())
++        self.assertEqual(out["session"]["model"], "gemini-3.8-live")
++        self.assertEqual(len(vl.DEFAULT_GEMINI_MODELS), 4)
++        # Models that were seen not delegating are opt-in only.
++        self.assertNotIn("gemini-3.8-live-extended-thinking", vl.DEFAULT_GEMINI_MODELS)
++        self.assertNotIn("gemini-2.5-flash-native-audio-preview-09-2025", vl.DEFAULT_GEMINI_MODELS)
++        self.assertEqual(out["transport"]["remaining"][-1], "gemini-2.5-flash-native-audio-preview-12-2025")
++        self.assertTrue(out["transport"]["url"].endswith("access_token=tok123"))
++        self.assertNotIn("api_key", str(out))
++
++    def test_failure_report_moves_to_next_model_and_sets_cooldown(self):
++        out = self._session(_voice(), failed=[{"model": "gemini-3.8-live", "reason": "quota"}])
++        self.assertEqual(out["session"]["model"], "gemini-3.1-flash-live-preview")
++        # A brand-new attempt (no failed list) still skips the cooling model.
++        again = self._session(_voice())
++        self.assertEqual(again["session"]["model"], "gemini-3.1-flash-live-preview")
++
++    def test_first_three_fail_fourth_answers(self):
++        models = list(vl.DEFAULT_GEMINI_MODELS)
++        failed = [{"model": m, "reason": "quota"} for m in models[:3]]
++        out = self._session(_voice(), failed=failed)
++        self.assertEqual(out["session"]["model"], models[3])
++        self.assertEqual(out["transport"]["remaining"], [])
++
++    def test_opt_in_thinking_model_gets_a_thinking_level(self):
++        out = self._session(_voice(models=["gemini-3.8-live-extended-thinking"], thinking_level="MEDIUM"))
++        setup = out["transport"]["setup"]["setup"]
++        self.assertEqual(setup["generationConfig"]["thinkingConfig"], {"thinkingLevel": "medium"})
++
++    def test_all_models_failed_raises_chain_exhausted(self):
++        failed = [{"model": m} for m in vl.DEFAULT_GEMINI_MODELS]
++        with self.assertRaises(RuntimeError) as ctx:
++            self._session(_voice(), failed=failed)
++        self.assertIn("Every Gemini Live model failed", str(ctx.exception))
++
++    def test_cooldown_ignored_when_all_cooling_but_exclude_wins(self):
++        for m in vl.DEFAULT_GEMINI_MODELS:
++            vl.mark_gemini_failure(m)
++        # Everything cooling: a fresh attempt still gets the first model rather than nothing.
++        self.assertEqual(self._session(_voice())["session"]["model"], "gemini-3.8-live")
++        # But a model excluded in this attempt is never re-offered.
++        out = self._session(_voice(), failed=[{"model": "gemini-3.8-live"}])
++        self.assertNotEqual(out["session"]["model"], "gemini-3.8-live")
++
++    def test_cooldown_expires(self):
++        vl.mark_gemini_failure("gemini-3.8-live")
++        vl._cooldowns["gemini-3.8-live"] = vl.time.monotonic() - 1
++        self.assertEqual(self._session(_voice())["session"]["model"], "gemini-3.8-live")
++
++    def test_resume_pins_same_model_and_carries_handle(self):
++        out = self._session(_voice(), model="gemini-3.1-flash-live-preview", resume_handle="h-1")
++        self.assertEqual(out["session"]["model"], "gemini-3.1-flash-live-preview")
++        self.assertEqual(out["transport"]["setup"]["setup"]["sessionResumption"], {"handle": "h-1"})
++
++    def test_resume_of_unknown_model_is_refused(self):
++        with self.assertRaises(RuntimeError):
++            self._session(_voice(), model="not-in-chain", resume_handle="h")
++
++    def test_configured_models_and_voice_are_honoured(self):
++        out = self._session(_voice(models=["models/a-live", "b-live", "a-live"], voice="Puck"))
++        self.assertEqual(out["session"]["model"], "a-live")
++        self.assertEqual(out["transport"]["remaining"], ["b-live"])
++        voice = out["transport"]["setup"]["setup"]["generationConfig"]["speechConfig"]
++        self.assertEqual(voice["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Puck")
++
++    def test_missing_key_and_empty_models(self):
++        with mock.patch.object(vl, "_resolve_gemini_key", return_value=""):
++            with self.assertRaises(ValueError):
++                self._session(_voice())
++        with self.assertRaises(ValueError):
++            self._session(_voice(models=[]))
++
++    def test_setup_message_is_penny_with_one_delegate_function(self):
++        setup = self._session(_voice())["transport"]["setup"]["setup"]
++        text = setup["systemInstruction"]["parts"][0]["text"]
++        self.assertIn("You are Penny", text)
++        self.assertIn("never as Gemini", text)
++        decls = setup["tools"][0]["functionDeclarations"]
++        self.assertEqual([d["name"] for d in decls], ["delegate_to_hermes"])
++        self.assertNotIn("behavior", decls[0])  # blocking: verified on every chain model
++        self.assertEqual(setup["generationConfig"]["responseModalities"], ["AUDIO"])
++        self.assertIn("inputAudioTranscription", setup)
++        self.assertIn("outputAudioTranscription", setup)
++        self.assertNotIn("thinkingConfig", setup["generationConfig"])
++
++    def test_history_is_folded_into_instructions(self):
++        history = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello there"}]},
++                   {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}]
++        text = self._session(_voice(), history=history)["transport"]["setup"]["setup"]["systemInstruction"]["parts"][0]["text"]
++        self.assertIn("User: hello there", text)
++        self.assertIn("Penny: hi", text)
++
++
++class Status(unittest.TestCase):
++    def test_gemini_status_reports_chain_and_availability(self):
++        with mock.patch.object(vl, "_voice_section", return_value=_voice()), \
++                mock.patch.object(vl, "_resolve_gemini_key", return_value="k"):
++            st = vl.resolve_gpt_live_status()
++        self.assertEqual((st["mode"], st["provider"], st["available"]), ("gpt-live", "gemini", True))
++        self.assertEqual(st["model"], "gemini-3.8-live")
++        self.assertEqual(len(st["models"]), 4)
++        self.assertNotIn("k", [v for v in st.values() if isinstance(v, str) and len(v) == 1])
++
++    def test_gemini_status_unavailable_without_key(self):
++        with mock.patch.object(vl, "_voice_section", return_value=_voice()), \
++                mock.patch.object(vl, "_resolve_gemini_key", return_value=""):
++            st = vl.resolve_gpt_live_status()
++        self.assertFalse(st["available"])
++        self.assertIn("Gemini", st["reason"])
++
++    def test_openai_stays_default(self):
++        voice = {"voice_chat_mode": "gpt-live", "gpt_live": {"model": "gpt-live-1"}}
++        with mock.patch.object(vl, "_voice_section", return_value=voice), \
++                mock.patch.object(vl, "_resolve_credentials", return_value=("", vl.DEFAULT_LIVE_BASE_URL)):
++            st = vl.resolve_gpt_live_status()
++        self.assertEqual(st["provider"], "openai")
++        self.assertFalse(st["available"])
++        self.assertEqual(vl.live_provider({"provider": "Google"}), "gemini")
++        self.assertEqual(vl.live_provider({}), "openai")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/voice_live.py b/tools/voice_live.py
+index ad5d4d7..33878b1 100644
+--- a/tools/voice_live.py
++++ b/tools/voice_live.py
+@@ -22,8 +22,11 @@ Hermes turn.
+ 
+ from __future__ import annotations
+ 
++import datetime
+ import json
+ import logging
++import threading
++import time
+ import urllib.error
+ import urllib.request
+ from typing import Any, Dict, Optional
+@@ -35,6 +38,26 @@ CHAINED_MODE = "chained"
+ DEFAULT_LIVE_MODEL = "gpt-live-1"
+ DEFAULT_LIVE_VOICE = "marin"
+ DEFAULT_LIVE_BASE_URL = "https://api.openai.com/v1"
++OPENAI_PROVIDER = "openai"
++GEMINI_PROVIDER = "gemini"
++DEFAULT_GEMINI_VOICE = "Aoede"
++# Failover order for the Gemini Live provider. The chain is tried top to bottom per session
++# start; a model that just failed is skipped for GEMINI_COOLDOWN_SECONDS. Only models that were
++# seen delegating a factual question through ``delegate_to_hermes`` belong here. Tested and left
++# OUT (add via ``voice.gpt_live.gemini.models`` if wanted): ``gemini-3.8-live-extended-thinking``
++# (says it will check, then never calls the function) and
++# ``gemini-2.5-flash-native-audio-preview-09-2025`` (invented a different disk figure each run
++# instead of delegating). When this whole chain fails the desktop falls back to chained voice.
++DEFAULT_GEMINI_MODELS = (
++    "gemini-3.8-live",
++    "gemini-3.1-flash-live-preview",
++    "gemini-2.5-flash-native-audio-latest",
++    "gemini-2.5-flash-native-audio-preview-12-2025",
++)
++GEMINI_COOLDOWN_SECONDS = 300
++GEMINI_LIVE_WS = ("wss://generativelanguage.googleapis.com/ws/"
++                  "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained")
++GEMINI_TOKENS_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
+ # Voices the vendor lists for gpt-live-1 (live-conversations guide) plus the realtime defaults it
+ # accepts; free text stays allowed for custom voices.
+ GPT_LIVE_VOICES = (
+@@ -128,15 +151,48 @@ def live_instructions(live: Optional[dict[str, Any]] = None) -> str:
+     return f"{LIVE_PERSONA}\n\n{extra}" if extra else LIVE_PERSONA
+ 
+ 
+-def resolve_gpt_live_status() -> dict[str, Any]:
+-    """Non-secret readiness verdict for the client: which mode is selected and whether GPT-Live
+-    can start (a key resolves). Never returns the key."""
++def live_provider(live: Optional[dict[str, Any]] = None) -> str:
++    """``openai`` (default, WebRTC ``gpt-live-1``) or ``gemini`` (Google Live API over a WebSocket
++    the renderer opens itself with a single-use ephemeral token)."""
++    raw = str((live if live is not None else _live_section()).get("provider") or OPENAI_PROVIDER)
++    return GEMINI_PROVIDER if raw.strip().lower() in {"gemini", "google"} else OPENAI_PROVIDER
++
++
++def resolve_gpt_live_status(openai_shape: bool = False) -> dict[str, Any]:
++    """Non-secret readiness verdict for the client: which mode is selected and whether Live can
++    start (a key resolves for the selected provider). Never returns a key.
++
++    ``openai_shape``: for clients that only know the OpenAI contract (the phone app) answer with
++    exactly the OpenAI-era fields; the Gemini provider then serves them through the WebRTC bridge."""
+     voice = _voice_section()
+     mode = voice_chat_mode(voice)
+     live = _live_section(voice)
++    if live_provider(live) == GEMINI_PROVIDER:
++        gem = _gemini_section(live)
++        api_key = _resolve_gemini_key(gem)
++        models = gemini_models(gem)
++        if openai_shape:
++            ok = bool(api_key and models and gemini_bridge_healthy())
++            return {
++                "mode": mode,
++                "available": ok,
++                "reason": None if ok else "Gemini Live bridge is not running or no Gemini API key",
++                "model": str(live.get("model") or DEFAULT_LIVE_MODEL),
++                "voice": str(live.get("voice") or DEFAULT_LIVE_VOICE),
++            }
++        return {
++            "mode": mode,
++            "provider": GEMINI_PROVIDER,
++            "available": bool(api_key and models),
++            "reason": None if (api_key and models) else "no Gemini API key (set GEMINI_API_KEY) or no Live models configured",
++            "model": models[0] if models else "",
++            "models": models,
++            "voice": str(gem.get("voice") or DEFAULT_GEMINI_VOICE),
++        }
+     api_key, _base = _resolve_credentials(live)
+     return {
+         "mode": mode,
++        "provider": OPENAI_PROVIDER,
+         "available": bool(api_key),
+         "reason": None if api_key else "no OpenAI API key (set OPENAI_API_KEY or voice.gpt_live.api_key)",
+         "model": str(live.get("model") or DEFAULT_LIVE_MODEL),
+@@ -184,3 +240,280 @@ def create_webrtc_session(sdp_offer: str, history: Optional[list] = None) -> dic
+         detail = exc.read().decode("utf-8", "replace")[:600]
+         logger.warning("GPT-Live session creation failed: %s %s", exc.code, detail)
+         raise RuntimeError(f"GPT-Live session creation failed ({exc.code}): {detail}") from exc
++
++
++# ---------------------------------------------------------------------------------------------
++# Gemini Live provider (``voice.gpt_live.provider: gemini``)
++#
++# Same division of labour as the OpenAI path: the renderer owns mic + speaker, this module owns
++# credentials. The Google API key never leaves this host: the renderer receives a single-use
++# ephemeral token (valid ~2 minutes to START a session) plus the exact ``setup`` message to send.
++# Gemini has no "client delegation" mode, so delegation is one blocking function,
++# ``delegate_to_hermes(request)``; the renderer answers it with Hermes' reply text.
++# ---------------------------------------------------------------------------------------------
++
++GEMINI_PERSONA = (
++    "You are Penny, a calm, warm voice assistant with a dry sense of humour. Introduce yourself "
++    "only as Penny, never as Gemini, a model, or a Google product. Speak naturally and briefly, "
++    "at an unhurried pace, in plain spoken sentences.\n\n"
++    "You have no knowledge or tools of your own about the user's machine, files, projects, "
++    "calendar, messages, memory or the outside world. The Hermes agent behind you does: it can "
++    "run commands, read and edit files, browse the web, remember things across sessions and "
++    "schedule tasks. Call delegate_to_hermes for ALL of that.\n\n"
++    "Call delegate_to_hermes when:\n"
++    "- The user asks a question that needs facts, current information or careful reasoning.\n"
++    "- The user asks you to do, check, find, make, fix, run, open, send or remember anything.\n"
++    "- The user corrects or changes a request already given.\n"
++    "Pass the user's full request in your own clear words, including any correction.\n\n"
++    "Do not call it for greetings, small talk, thanks, a request to repeat something you already "
++    "said, or a short clarifying question. Do not call it for background noise, coughs or "
++    "half-heard fragments; stay quiet or ask them to repeat.\n\n"
++    "Never guess an answer that depends on the machine or on facts. When you delegate, say at most "
++    "one very short line such as 'one moment' first, then wait for the result and tell the user "
++    "what it says in your own words, keeping it short. Never claim something was done before the "
++    "result says so. When you are interrupted, stop talking and listen."
++)
++
++DELEGATE_FUNCTION = {
++    "name": "delegate_to_hermes",
++    "description": (
++        "Ask the Hermes agent to do real work or look anything up: facts, current information, "
++        "the user's machine, files, projects, web, memory, scheduling, running commands. Returns "
++        "Hermes' answer as text to say to the user."),
++    "parameters": {
++        "type": "OBJECT",
++        "properties": {"request": {"type": "STRING",
++                                   "description": "The user's full request, in clear words."}},
++        "required": ["request"],
++    },
++}
++
++_cooldowns: dict[str, float] = {}
++_cooldown_lock = threading.Lock()
++
++
++def _gemini_section(live: Optional[dict[str, Any]] = None) -> dict[str, Any]:
++    section = (live if live is not None else _live_section()).get("gemini")
++    return section if isinstance(section, dict) else {}
++
++
++def gemini_models(gem: Optional[dict[str, Any]] = None) -> list[str]:
++    raw = (gem if gem is not None else _gemini_section()).get("models")
++    items = raw if isinstance(raw, (list, tuple)) else list(DEFAULT_GEMINI_MODELS)
++    out: list[str] = []
++    for item in items:
++        name = str(item or "").strip().removeprefix("models/")
++        if name and name not in out:
++            out.append(name)
++    return out
++
++
++def _resolve_gemini_key(gem: dict[str, Any]) -> str:
++    key = str(gem.get("api_key") or "").strip()
++    if key:
++        return key
++    try:
++        from hermes_cli.config import get_env_value
++        return str(get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY") or "").strip()
++    except Exception:
++        return ""
++
++
++def gemini_instructions(live: Optional[dict[str, Any]] = None) -> str:
++    extra = str((live if live is not None else _live_section()).get("instructions") or "").strip()
++    return f"{GEMINI_PERSONA}\n\n{extra}" if extra else GEMINI_PERSONA
++
++
++def _history_to_gemini(history: Optional[list]) -> str:
++    """Flatten the OpenAI-shaped seed history into a short transcript for the system prompt."""
++    lines: list[str] = []
++    for item in history or []:
++        try:
++            role = "User" if item.get("role") == "user" else "Penny"
++            text = " ".join(str(part.get("text") or "") for part in (item.get("content") or [])).strip()
++        except AttributeError:
++            continue
++        if text:
++            lines.append(f"{role}: {text[:600]}")
++    return "\n".join(lines[-24:])
++
++
++def build_gemini_setup(model: str, history: Optional[list] = None,
++                       resume_handle: Optional[str] = None) -> dict[str, Any]:
++    """The first WebSocket message (``{"setup": ...}``) for ``model``."""
++    live = _live_section()
++    gem = _gemini_section(live)
++    instructions = gemini_instructions(live)
++    transcript = _history_to_gemini(history)
++    if transcript:
++        instructions += ("\n\nRecent text conversation with this user (for context only):\n" + transcript)
++    generation: dict[str, Any] = {
++        "responseModalities": ["AUDIO"],
++        "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
++            "voiceName": str(gem.get("voice") or DEFAULT_GEMINI_VOICE)}}},
++    }
++    if "extended-thinking" in model:
++        generation["thinkingConfig"] = {"thinkingLevel": str(gem.get("thinking_level") or "low").lower()}
++    setup: dict[str, Any] = {
++        "model": f"models/{model}",
++        "generationConfig": generation,
++        "systemInstruction": {"parts": [{"text": instructions}]},
++        "tools": [{"functionDeclarations": [DELEGATE_FUNCTION]}],
++        "contextWindowCompression": {"slidingWindow": {}},
++        "sessionResumption": ({"handle": resume_handle} if resume_handle else {}),
++        "inputAudioTranscription": {},
++        "outputAudioTranscription": {},
++    }
++    return {"setup": setup}
++
++
++def mark_gemini_failure(model: str) -> None:
++    """Skip ``model`` for GEMINI_COOLDOWN_SECONDS (called when a client reports a failed start)."""
++    with _cooldown_lock:
++        _cooldowns[model] = time.monotonic() + GEMINI_COOLDOWN_SECONDS
++
++
++def _cooling(model: str) -> bool:
++    with _cooldown_lock:
++        until = _cooldowns.get(model, 0.0)
++        if until and until <= time.monotonic():
++            _cooldowns.pop(model, None)
++            return False
++        return until > 0.0
++
++
++def pick_gemini_model(models: list[str], exclude: Optional[list[str]] = None,
++                      pinned: Optional[str] = None) -> Optional[str]:
++    """First configured model that is neither excluded for this start attempt nor cooling down.
++    When every remaining model is cooling the cooldown is ignored once (a stale cooldown must not
++    make Live unusable); ``exclude`` always wins so one attempt never loops."""
++    excluded = {str(m).removeprefix("models/") for m in (exclude or [])}
++    if pinned:
++        pinned = pinned.removeprefix("models/")
++        return pinned if pinned in models and pinned not in excluded else None
++    remaining = [m for m in models if m not in excluded]
++    for model in remaining:
++        if not _cooling(model):
++            return model
++    return remaining[0] if remaining else None
++
++
++def _mint_gemini_token(api_key: str) -> str:
++    now = datetime.datetime.now(datetime.timezone.utc)
++    iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
++    body = json.dumps({"uses": 1,
++                       "expireTime": iso(now + datetime.timedelta(minutes=30)),
++                       "newSessionExpireTime": iso(now + datetime.timedelta(minutes=2))}).encode("utf-8")
++    req = urllib.request.Request(
++        GEMINI_TOKENS_URL, data=body, method="POST",
++        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"})
++    try:
++        with urllib.request.urlopen(req, timeout=20) as resp:
++            name = str(json.loads(resp.read().decode("utf-8")).get("name") or "")
++    except urllib.error.HTTPError as exc:
++        # Never include the request headers or the key; the vendor body is short and key-free.
++        detail = exc.read().decode("utf-8", "replace")[:300]
++        logger.warning("Gemini Live token mint failed: %s %s", exc.code, detail)
++        raise RuntimeError(f"Gemini Live token request failed ({exc.code})") from None
++    if not name:
++        raise RuntimeError("Gemini Live token response had no token")
++    return name
++
++
++def create_gemini_session(history: Optional[list] = None, failed: Optional[list] = None,
++                          model: Optional[str] = None,
++                          resume_handle: Optional[str] = None) -> dict[str, Any]:
++    """Pick the next Live model in the chain and hand the renderer what it needs to dial it.
++
++    ``failed``: ``[{"model": ..., "reason": ...}]`` models that already failed to start in THIS
++    attempt (they are excluded and put on cooldown). ``model`` + ``resume_handle`` re-dial the
++    same model after a dropped connection. Raises ``ValueError`` (no key / no models) or
++    ``RuntimeError`` (chain exhausted, token mint failed).
++    """
++    live = _live_section()
++    gem = _gemini_section(live)
++    api_key = _resolve_gemini_key(gem)
++    models = gemini_models(gem)
++    if not api_key:
++        raise ValueError("Gemini Live needs a Gemini API key (GEMINI_API_KEY)")
++    if not models:
++        raise ValueError("voice.gpt_live.gemini.models is empty")
++    exclude: list[str] = []
++    for item in failed or []:
++        name = str((item or {}).get("model") or "").removeprefix("models/")
++        if name:
++            exclude.append(name)
++            mark_gemini_failure(name)
++    chosen = pick_gemini_model(models, exclude, pinned=model)
++    if not chosen:
++        raise RuntimeError("Every Gemini Live model failed to start: " + ", ".join(exclude or models))
++    token = _mint_gemini_token(api_key)
++    return {
++        "session": {"provider": GEMINI_PROVIDER, "model": chosen, "id": None},
++        "transport": {
++            "type": "websocket",
++            "url": f"{GEMINI_LIVE_WS}?access_token={token}",
++            "setup": build_gemini_setup(chosen, history, resume_handle),
++            "remaining": [m for m in models if m != chosen and m not in exclude],
++        },
++    }
++
++
++# ---------------------------------------------------------------------------------------------
++# WebRTC bridge for clients that only speak the OpenAI Live contract (e.g. the phone app).
++# A loopback relay (``live_bridge.py``, own venv/service) terminates their WebRTC and holds the
++# Gemini socket; this side just walks the model chain against it.
++# ---------------------------------------------------------------------------------------------
++
++DEFAULT_BRIDGE_URL = "http://127.0.0.1:8890"
++
++
++def _bridge_url(gem: Optional[dict[str, Any]] = None) -> str:
++    return str((gem if gem is not None else _gemini_section()).get("bridge_url") or DEFAULT_BRIDGE_URL).rstrip("/")
++
++
++def gemini_bridge_healthy() -> bool:
++    try:
++        with urllib.request.urlopen(f"{_bridge_url()}/health", timeout=2) as resp:
++            return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
++    except Exception:
++        return False
++
++
++def create_gemini_bridge_session(sdp_offer: str, history: Optional[list] = None) -> dict[str, Any]:
++    """Answer an OpenAI-style WebRTC offer through the bridge, failing over down the model chain.
++    Returns the same shape as ``create_webrtc_session``."""
++    live = _live_section()
++    gem = _gemini_section(live)
++    models = gemini_models(gem)
++    if not _resolve_gemini_key(gem):
++        raise ValueError("Gemini Live needs a Gemini API key (GEMINI_API_KEY)")
++    if not models:
++        raise ValueError("voice.gpt_live.gemini.models is empty")
++    failed: list[str] = []
++    last = ""
++    while True:
++        model = pick_gemini_model(models, failed)
++        if not model:
++            raise RuntimeError("Every Gemini Live model failed to start: " + ", ".join(failed or models)
++                               + (f" ({last})" if last else ""))
++        body = json.dumps({"sdp": sdp_offer, "model": model,
++                           "setup": build_gemini_setup(model, history)}).encode("utf-8")
++        req = urllib.request.Request(f"{_bridge_url(gem)}/offer", data=body, method="POST",
++                                     headers={"Content-Type": "application/json"})
++        try:
++            with urllib.request.urlopen(req, timeout=40) as resp:
++                out = json.loads(resp.read().decode("utf-8"))
++            return {"session": {"id": out["session"]["id"]},
++                    "transport": {"type": "webrtc", "sdp": out["sdp"]}}
++        except urllib.error.HTTPError as exc:
++            detail = exc.read().decode("utf-8", "replace")[:300]
++            if exc.code == 502:  # this model would not start: next one
++                logger.warning("Gemini Live bridge: %s failed to start: %s", model, detail)
++                failed.append(model)
++                mark_gemini_failure(model)
++                last = detail[:120]
++                continue
++            raise RuntimeError(f"Gemini Live bridge error ({exc.code}): {detail}") from None
++        except (urllib.error.URLError, OSError) as exc:
++            raise RuntimeError(f"Gemini Live bridge is not reachable: {exc}") from None

@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-18",
+  "offline": {
+    "bridge": {
+      "tests": 20,
+      "passed": true
+    },
+    "provider": {
+      "tests": 16,
+      "passed": true
+    },
+    "renderer": {
+      "tests": 9,
+      "passed": true
+    },
+    "total_tests": 45
+  },
+  "relay_long_call": {
+    "synthetic_stub": true,
+    "relay_only": true,
+    "duration_requested": 170.0,
+    "delegations": 2,
+    "audio_samples": 158400,
+    "input_transcript": "Please ask Hermes for the synthetic verification phrase.Please ask Hermes for a fresh server verification token. It has changed. So check again instead of repeating the old answer.",
+    "output_transcript": "That phrase is violet river.It remains violet river.",
+    "connected": true,
+    "closed_cleanly": true,
+    "still_connected_before_close": true,
+    "selected_pairs": [
+      {
+        "local": "host",
+        "remote": "relay"
+      }
+    ],
+    "passed": true
+  },
+  "controlled_socket_resume": {
+    "synthetic_stub": true,
+    "relay_only": true,
+    "duration_requested": 170.0,
+    "delegations": 3,
+    "audio_samples": 389760,
+    "input_transcript": "Please ask Hermes for the synthetic verification phrase.Please ask Hermes for a fresh server verification token. It has changed, so check again instead of repeating the old answer.",
+    "output_transcript": "The synthetic verification phrase is violet river.I'll check the current status for you now.It appears the verification phrase is still violet river.",
+    "connected": true,
+    "closed_cleanly": true,
+    "still_connected_before_close": true,
+    "selected_pairs": [
+      {
+        "local": "host",
+        "remote": "relay"
+      }
+    ],
+    "passed": true,
+    "provider_resumed_confirmed": true,
+    "exactly_once_delegation_proven": false
+  },
+  "earlier_repeat_probe": {
+    "synthetic_stub": true,
+    "relay_only": true,
+    "duration_requested": 155.0,
+    "delegations": 1,
+    "audio_samples": 252480,
+    "input_transcript": "Please ask Hermes for the synthetic verification phrase.Please ask Hermes for the synthetic verification phrase.",
+    "output_transcript": "The synthetic verification phrase is violet river.The synthetic verification phrase remains 'violet",
+    "connected": true,
+    "closed_cleanly": true,
+    "still_connected_before_close": true,
+    "selected_pairs": [
+      {
+        "local": "host",
+        "remote": "relay"
+      }
+    ],
+    "passed": false
+  },
+  "patch": {
+    "patch_apply_check": true,
+    "reconstructed_files_match": true,
+    "base_commit": "ae2a81ccc00e9b7c06301523e5bb09608397149c",
+    "patch_sha256": "ede176517e132eb2837962effaa4e602b1fcfdd940fba751fbcb5d53f98a78fa"
+  },
+  "publication_review": {
+    "production_source_unchanged": true,
+    "private_identifier_and_secret_scan": "passed",
+    "scope": "publication tree, known secrets from two named local env files, private deployment identifiers and common token/private-key patterns",
+    "independent_security_audit": false,
+    "files_scanned": 29
+  },
+  "limitations": [
+    "No physical-phone Tailscale-off test",
+    "No real phone tools/memory acceptance",
+    "No destructive agent actions tested",
+    "Controlled socket close is not an arbitrary network outage",
+    "Resume probe emitted three delegation events for two synthetic utterances; cause not established"
+  ]
+}

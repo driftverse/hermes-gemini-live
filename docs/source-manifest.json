@@ -1,0 +1,39 @@
+{
+  "upstream": "https://github.com/NousResearch/hermes-agent",
+  "base_commit": "ae2a81ccc00e9b7c06301523e5bb09608397149c",
+  "files": {
+    "tools/voice_live.py": {
+      "sha256": "564547abd20676444070fbe57d7e602f2304f8170b3080bb66b3de4d5c58ca68"
+    },
+    "hermes_cli/web_models.py": {
+      "sha256": "75aa2db531f3842d3c92fc32fdda56933e7795c8e89ae54e65ef9a31783180e3"
+    },
+    "hermes_cli/web_routers/audio.py": {
+      "sha256": "1f0908ebe18e263eb74cff6582eed34df19be4ba6671bbfcfde9bbe2214e822f"
+    },
+    "apps/desktop/src/lib/voice-live.ts": {
+      "sha256": "5d964e71aa784d3e5c2aa6f85036121add43c02c598f419f621100739c3f068c"
+    },
+    "apps/desktop/src/lib/voice-live-gemini.ts": {
+      "sha256": "0a17be1457a38a6d31de593b35c88a92345075a516e1e5ddf79f63e27b8ab419"
+    },
+    "apps/desktop/src/lib/voice-live-gemini.test.ts": {
+      "sha256": "e07a74a3598d2654582145cc7de145bc84a47c47a929ccb2e8efbf8dd199a726"
+    },
+    "apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts": {
+      "sha256": "fefcaffafbbdba1f73738d87400c91beeebbe27d4d76f1a86bb1f571f83c97ad"
+    },
+    "apps/desktop/src/app/chat/composer/hooks/use-composer-voice.ts": {
+      "sha256": "648201169800761ede01c31d6cf8fc8628fda9c6b63fbac0fb65fc15f11ed173"
+    },
+    "apps/desktop/src/i18n/en.ts": {
+      "sha256": "254ff1c9b7515c3db0d5d2a4842703d5b0c8735bd7cdd9d5f4b9bd888d1d103b"
+    },
+    "tests/tools/test_voice_live_gemini.py": {
+      "sha256": "2ef642daf7d030568615621a64de062242074f35c380c13164e871c5d1486a28"
+    },
+    "bridge/live_bridge.py": {
+      "sha256": "10422443dc728b7542a140652d5a11d24f7c193cee51c93bee9a2ab9aba9d4a4"
+    }
+  }
+}
