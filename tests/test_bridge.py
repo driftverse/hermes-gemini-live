@@ -133,6 +133,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.s.gemini_reader()
         self.s.dial.assert_awaited_once_with('synthetic-handle')
 
+    async def test_resume_retries_when_provider_still_holds_old_socket(self):
+        class Socket:
+            def __aiter__(self): return self
+            async def __anext__(self): raise StopAsyncIteration
+        self.s.ws = Socket()
+        self.s.resume = 'synthetic-handle'
+        attempts = []
+        async def dial(handle):
+            attempts.append(handle)
+            if len(attempts) < 3:
+                raise RuntimeError('1008 session is already connected to an existing client')
+            self.s.closed = True   # resumed; stop the reader loop for the test
+        self.s.dial = AsyncMock(side_effect=dial)
+        with patch.object(b, 'RESUME_RETRY_DELAYS_S', (0, 0.01, 0.01)), patch.object(b.asyncio, 'sleep', AsyncMock()):
+            await self.s.gemini_reader()
+        self.assertEqual(len(attempts), 3)
+
+    async def test_resume_gives_up_after_all_retries(self):
+        class Socket:
+            def __aiter__(self): return self
+            async def __anext__(self): raise StopAsyncIteration
+        self.s.ws = Socket()
+        self.s.resume = 'synthetic-handle'
+        self.s.dial = AsyncMock(side_effect=RuntimeError('always rejected'))
+        self.s.close = AsyncMock()
+        with patch.object(b, 'RESUME_RETRY_DELAYS_S', (0.01, 0.01)), patch.object(b.asyncio, 'sleep', AsyncMock()):
+            await self.s.gemini_reader()
+        self.assertEqual(self.s.dial.await_count, 3)
+        self.s.close.assert_awaited_once_with('connection_lost')
+
     async def test_ice_cache(self):
         with patch.dict(b._ice_cache, {'at':b.time.time(),'servers':[{'urls':['turn:example.invalid']}]}), patch.object(b,'_fetch_ice') as fetch:
             self.assertTrue(await b.ice_servers())

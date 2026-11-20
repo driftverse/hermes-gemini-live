@@ -41,6 +41,9 @@ SETUP_TIMEOUT = 12.0
 SETTLE_QUIET_S = 2.0        # no new reply chunk for this long -> reply considered complete
 SETTLE_AFTER_THINK_S = 4.0  # ...and no tool-progress note this recent
 NO_REPLY_TIMEOUT_S = 150.0
+# Google may still hold the old socket for a moment after it drops; an immediate re-dial is rejected
+# with 1008 "already connected to an existing client". Retry the resume with growing pauses.
+RESUME_RETRY_DELAYS_S = (0.5, 1.5, 3.0)
 IN_RATE, OUT_RATE, WIRE_RATE = 16_000, 24_000, 48_000
 # STUN adds ~5 s to every session start (aiortc waits for each interface to time out). Off by default:
 # same-network and IPv6-direct phones do not need it. Set LIVE_BRIDGE_STUN=stun:... to enable.
@@ -175,6 +178,9 @@ class Session:
         self.reconnecting = False
         self.pending: dict[str, dict] = {}
         self.done: dict[str, float] = {}
+        self.results: dict[str, str] = {}   # call id -> response already sent (replay-safe)
+        self.seen: set[str] = set()         # every call id ever dispatched to the client
+        self.cancelled: set[str] = set()    # ids the provider cancelled: nothing may be spoken for them
         self.tasks: list[asyncio.Task] = []
         self.late: list[str] = []
         self.late_at = 0.0
@@ -225,11 +231,21 @@ class Session:
             if self.resume and not self.reconnecting:
                 self.reconnecting = True
                 try:
-                    await self.dial(self.resume)
-                    log.info("%s resumed", self.id)
-                    continue
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s resume failed: %s", self.id, exc)
+                    resumed = False
+                    for attempt, pause in enumerate((0.0,) + tuple(RESUME_RETRY_DELAYS_S)):
+                        if pause:
+                            await asyncio.sleep(pause)
+                        if self.closed:
+                            return
+                        try:
+                            await self.dial(self.resume)
+                            log.info("%s resumed%s", self.id, f" (attempt {attempt + 1})" if attempt else "")
+                            resumed = True
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("%s resume attempt %d failed: %s", self.id, attempt + 1, str(exc)[:120])
+                    if resumed:
+                        continue
                 finally:
                     self.reconnecting = False
             await self.close("connection_lost")
@@ -260,18 +276,29 @@ class Session:
                     {"id": call["id"], "name": call["name"], "response": {"error": "Unknown function"}}]}})
                 continue
             cid = call["id"]
+            if cid in self.seen:
+                # A replayed call (e.g. after a provider resume) must never reach the client twice.
+                log.info("%s duplicate call %s ignored", self.id, cid)
+                if cid in self.results:  # already answered: repeat the same answer once, no new work
+                    await self.gsend({"toolResponse": {"functionResponses": [{
+                        "id": cid, "name": DELEGATE, "response": {"result": self.results[cid]}}]}})
+                continue
+            self.seen.add(cid)
             self.pending[cid] = {"chunks": [], "last": 0.0, "think": 0.0, "start": time.time()}
             self.emit({"type": "session.delegation.created",
                        "delegation": {"id": cid, "type": "client", "target": "hermes"}})
         for cid in (m.get("toolCallCancellation") or {}).get("ids", []):
             self.pending.pop(cid, None)
+            self.cancelled.add(cid)
 
     async def respond(self, cid: str, text: str) -> None:
         self.pending.pop(cid, None)
+        if cid in self.done or cid in self.cancelled:  # one answer per call, none for a cancelled one
+            return
         self.done[cid] = time.time()
+        self.results[cid] = (text or "Hermes finished without anything to report.")[:6000]
         await self.gsend({"toolResponse": {"functionResponses": [{
-            "id": cid, "name": DELEGATE,
-            "response": {"result": (text or "Hermes finished without anything to report.")[:6000]}}]}})
+            "id": cid, "name": DELEGATE, "response": {"result": self.results[cid]}}]}})
 
     async def watcher(self) -> None:
         while not self.closed:
@@ -294,6 +321,8 @@ class Session:
             return
         kind = ev.get("type")
         cid = ev.get("delegation_id")
+        if cid in self.cancelled and kind in ("session.commentary.append", "session.thinking.append"):
+            return  # a result for a call the provider cancelled must not be spoken later
         if kind == "session.commentary.append":
             text = str(ev.get("content") or "").strip()
             if not text:

@@ -16,9 +16,27 @@
 - Barge-in clears queued bridge audio. Already buffered client audio may remain. Clearing
   audio/cancelling a model function does NOT prove an in-flight Hermes action was cancelled.
   Bridge close stops bridge tasks/socket/peer; action cancellation remains client/Hermes-owned.
-- Resume qualification observed three delegation events for two synthetic utterances.
-  The cause is not established; do not assume exactly-once execution or allow destructive
-  actions without normal Hermes approval and application-level idempotency.
+- v0.1.1 de-duplicates provider call IDs in the bridge and the desktop hook, so a replayed call is not
+  dispatched to Hermes twice (a completed call replayed after a resume is answered again with the SAME
+  stored result, without new work). This stops duplicate dispatch of the same call ID; it is not a
+  general exactly-once guarantee. Distinct calls are still distinct actions: keep Hermes approvals on and
+  do not rely on voice for destructive actions without application-level idempotency.
+- Provider cancellations are honoured on the bridge (no answer, no late speech for a cancelled call) but are
+  NOT forwarded to the native phone app: its contract has no documented cancel event and an unknown event
+  could crash a closed-source client. A running agent turn on that client is not stopped by a provider cancel.
+  The patched desktop hook interrupts a running turn when voice ends, drops, unmounts or hears "stop"; this
+  ships as a source patch and requires rebuilding the desktop app.
+- Resumption races the provider: Google can reject an immediate re-dial with 1008 "already connected to an
+  existing client". The bridge now retries with 0.5/1.5/3 s pauses; in testing the second attempt succeeded.
+  In one of three forced-drop runs the second spoken request was not heard after the resume and the cause was
+  not established; other runs heard both.
+- TURN allocation is attempted once per call with a fixed 5-second gather window. In testing, two of roughly
+  ten relay-only server starts failed to allocate (four sequential and five concurrent allocations in a
+  separate check all succeeded). A call whose allocation fails advertises no relay candidate, which can fail
+  for a cross-network phone; retrying the call normally works.
+- Spoken readback of codes/IDs is not reliable evidence: one run's transcript spelled a token in words and
+  dropped a character; a later run's audio was independently transcribed by local Whisper and matched exactly.
+  Do not use voice to relay codes, amounts or other values that must be exact.
 - Reply completion on the bridge is inferred from two seconds of silence (four seconds
   after progress). A slow tool may be spoken prematurely, or a late result handled as an update.
   Concurrent/late delegation ownership needs further hardening before broad production use.

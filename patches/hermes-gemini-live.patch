@@ -22,7 +22,7 @@ index eadca6f..e0f8df5 100644
      onInterrupt,
      onStopWord: () => setVoiceConversationActive(false),
 diff --git a/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts b/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts
-index 6d43c93..7e0c792 100644
+index 6d43c93..2f3e500 100644
 --- a/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts
 +++ b/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts
 @@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
@@ -59,7 +59,16 @@ index 6d43c93..7e0c792 100644
    onFatalError,
    onInterrupt,
    onStopWord,
-@@ -152,6 +163,7 @@ export function useVoiceLiveConversation({
+@@ -144,6 +155,8 @@ export function useVoiceLiveConversation({
+   const userUtteranceRef = useRef('')
+   const utteranceTimerRef = useRef<null | number>(null)
+   const delegationRef = useRef<null | string>(null)
++  // Provider call ids already handed to Hermes: a replayed call (resume, retry) must not run twice.
++  const seenCallsRef = useRef(new Set<string>())
+   const spokenLengthRef = useRef(0)
+   const spokenResponseIdRef = useRef<null | string>(null)
+   const lastToolLabelRef = useRef<null | string>(null)
+@@ -152,6 +165,7 @@ export function useVoiceLiveConversation({
    const latest = useRef({
      activeToolLabel,
      beforeMicOpen,
@@ -67,7 +76,7 @@ index 6d43c93..7e0c792 100644
      onFatalError,
      onInterrupt,
      onStopWord,
-@@ -164,6 +176,7 @@ export function useVoiceLiveConversation({
+@@ -164,6 +178,7 @@ export function useVoiceLiveConversation({
    latest.current = {
      activeToolLabel,
      beforeMicOpen,
@@ -75,7 +84,28 @@ index 6d43c93..7e0c792 100644
      onFatalError,
      onInterrupt,
      onStopWord,
-@@ -240,6 +253,15 @@ export function useVoiceLiveConversation({
+@@ -216,6 +231,12 @@ export function useVoiceLiveConversation({
+     userUtteranceRef.current = ''
+     const session = sessionRef.current
+     sessionRef.current = null
++
++    // Ending voice (button, spoken stop, unmount) must not leave a started agent turn running.
++    if (session && delegationRef.current && busyRef.current) {
++      void latest.current.onInterrupt?.()
++    }
++
+     setDelegation(null)
+     spokenResponseIdRef.current = null
+     spokenLengthRef.current = 0
+@@ -232,6 +253,7 @@ export function useVoiceLiveConversation({
+     }
+ 
+     startingRef.current = true
++    seenCallsRef.current.clear()
+     const epoch = ++startEpochRef.current
+ 
+     try {
+@@ -240,6 +262,15 @@ export function useVoiceLiveConversation({
        // A wake-pause failure must not block an explicit start.
      }
  
@@ -91,7 +121,20 @@ index 6d43c93..7e0c792 100644
      if (!enabledRef.current || startEpochRef.current !== epoch) {
        startingRef.current = false
  
-@@ -291,12 +313,15 @@ export function useVoiceLiveConversation({
+@@ -279,6 +310,12 @@ export function useVoiceLiveConversation({
+           }
+ 
+           sessionRef.current = null
++
++          // The voice connection died mid-request: stop the agent turn it started.
++          if (delegationRef.current && busyRef.current) {
++            void latest.current.onInterrupt?.()
++          }
++
+           setDelegation(null)
+           setStatus('idle')
+ 
+@@ -291,12 +328,21 @@ export function useVoiceLiveConversation({
              latest.current.onFatalError?.()
            }
          },
@@ -102,6 +145,12 @@ index 6d43c93..7e0c792 100644
            }
  
 -          const { context: voiceContext, prompt } = delegationPrompt(context)
++          if (seenCallsRef.current.has(delegationId)) {
++            return
++          }
++
++          seenCallsRef.current.add(delegationId)
++
 +          const { context: voiceContext, prompt: heardPrompt } = delegationPrompt(context)
 +          // Gemini sends the model's own clean statement of the request; prefer it over the
 +          // raw (possibly partial) transcript of the last utterance.
@@ -109,7 +158,7 @@ index 6d43c93..7e0c792 100644
  
            // A spoken stop command ends the conversation instead of becoming a turn.
            if (prompt && isVoiceStopCommand(prompt)) {
-@@ -323,6 +348,7 @@ export function useVoiceLiveConversation({
+@@ -323,6 +369,7 @@ export function useVoiceLiveConversation({
            void Promise.resolve(latest.current.onSubmit(prompt, voiceContext)).catch(error => {
              notifyError(error, voiceCopy.liveDelegationFailed)
              session.speak(delegationId, 'Sorry, I could not reach Hermes for that request.')
@@ -117,7 +166,7 @@ index 6d43c93..7e0c792 100644
              setDelegation(null)
              refreshStatus()
            })
-@@ -336,7 +362,8 @@ export function useVoiceLiveConversation({
+@@ -336,7 +383,8 @@ export function useVoiceLiveConversation({
            refreshStatus()
          }
        },
@@ -127,7 +176,7 @@ index 6d43c93..7e0c792 100644
      )
  
      sessionRef.current = session
-@@ -365,6 +392,13 @@ export function useVoiceLiveConversation({
+@@ -365,6 +413,13 @@ export function useVoiceLiveConversation({
          return
        }
  
@@ -141,7 +190,7 @@ index 6d43c93..7e0c792 100644
        // Only a mic DOMException gets the recorder's copy: this catch also
        // takes non-mic start failures ('GPT-Live session already started',
        // 'Missing local SDP offer', API errors) — those keep their own message.
-@@ -432,6 +466,7 @@ export function useVoiceLiveConversation({
+@@ -432,6 +487,7 @@ export function useVoiceLiveConversation({
            spokenLengthRef.current = spoken.length
          }
  
@@ -149,7 +198,7 @@ index 6d43c93..7e0c792 100644
          latest.current.consumePendingResponse()
          setDelegation(null)
          refreshStatus()
-@@ -450,6 +485,8 @@ export function useVoiceLiveConversation({
+@@ -450,6 +506,8 @@ export function useVoiceLiveConversation({
            session.think(delegationId, 'Hermes finished that request without a spoken result.')
          }
  
@@ -1204,6 +1253,150 @@ index 0000000..ea0644b
 +    this.handlers.onClosed(reason, reason === 'close_requested' ? null : seconds)
 +  }
 +}
+diff --git a/apps/desktop/src/lib/voice-live-safety.test.tsx b/apps/desktop/src/lib/voice-live-safety.test.tsx
+new file mode 100644
+index 0000000..7852c20
+--- /dev/null
++++ b/apps/desktop/src/lib/voice-live-safety.test.tsx
+@@ -0,0 +1,138 @@
++import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++// Action-safety regression tests for the voice-Live conversation hook: replayed provider call ids
++// must not run twice, and ending/losing the voice session must interrupt a started Hermes turn.
++
++const state = vi.hoisted(() => ({ sessions: [] as any[] }))
++
++vi.mock('@/i18n', () => ({
++  useI18n: () => ({
++    t: { notifications: { voice: { liveEnded: 'Live ended', liveEndedClosed: 'closed', liveEndedConnectionLost: 'lost' } } }
++  })
++}))
++vi.mock('@/store/notifications', () => ({ notify: vi.fn(), notifyError: vi.fn() }))
++vi.mock('@/app/chat/composer/scope', () => ({
++  useComposerScope: () => ({ connectionId: 'synthetic-connection', profile: 'default' })
++}))
++vi.mock('@/lib/voice-live', () => ({
++  fetchVoiceLiveStatus: async () => ({ provider: 'gemini' }),
++  VoiceLiveSession: class {
++    activeDelegationId = null
++    sessionId = 'synthetic'
++    connected = true
++    constructor(public handlers: any) {
++      state.sessions.push(this)
++    }
++    async start() {}
++    close = vi.fn()
++    speak = vi.fn()
++    finishDelegation = vi.fn()
++    think = vi.fn()
++    setMuted = vi.fn()
++    instruct = vi.fn()
++  }
++}))
++
++import { useVoiceLiveConversation } from '@/app/chat/composer/hooks/use-voice-live-conversation'
++
++beforeEach(() => {
++  state.sessions = []
++})
++afterEach(() => cleanup())
++
++async function fixture() {
++  const onInterrupt = vi.fn()
++  const onSubmit = vi.fn()
++  const onFatalError = vi.fn()
++
++  const options = {
++    busy: false,
++    consumePendingResponse: vi.fn(),
++    enabled: true,
++    onFatalError,
++    onInterrupt,
++    onSubmit,
++    pendingResponse: () => null,
++    seedHistory: () => []
++  }
++
++  const hook = renderHook(props => useVoiceLiveConversation(props), { initialProps: options })
++  await act(async () => {
++    await hook.result.current.start()
++  })
++  await waitFor(() => expect(state.sessions.length).toBe(1))
++
++  return { hook, onFatalError, onInterrupt, onSubmit, options, session: state.sessions[0] }
++}
++
++const delegate = (session: any, id = 'same-call') =>
++  session.handlers.onDelegation(id, [{ endMs: 10, speaker: 'user', startMs: 0, text: 'Do one harmless counter action.' }], 'Do one harmless counter action.')
++
++describe('voice-Live action safety', () => {
++  it('submits a fresh delegation', async () => {
++    const f = await fixture()
++    act(() => delegate(f.session))
++    expect(f.onSubmit).toHaveBeenCalledTimes(1)
++  })
++
++  it('does not submit a replayed call id twice', async () => {
++    const f = await fixture()
++    act(() => {
++      delegate(f.session)
++      delegate(f.session)
++    })
++    expect(f.onSubmit).toHaveBeenCalledTimes(1)
++  })
++
++  it('a newer request interrupts a busy turn', async () => {
++    const f = await fixture()
++    act(() => delegate(f.session, 'c1'))
++    f.hook.rerender({ ...f.options, busy: true })
++    act(() => delegate(f.session, 'c2'))
++    expect(f.onInterrupt).toHaveBeenCalledTimes(1)
++  })
++
++  it('ending voice interrupts the running turn', async () => {
++    const f = await fixture()
++    act(() => delegate(f.session))
++    f.hook.rerender({ ...f.options, busy: true })
++    await act(async () => {
++      await f.hook.result.current.end()
++    })
++    expect(f.onInterrupt).toHaveBeenCalledTimes(1)
++  })
++
++  it('a lost connection interrupts the running turn', async () => {
++    const f = await fixture()
++    act(() => delegate(f.session))
++    f.hook.rerender({ ...f.options, busy: true })
++    act(() => f.session.handlers.onClosed('connection_lost', 3))
++    expect(f.onInterrupt).toHaveBeenCalledTimes(1)
++  })
++
++  it('unmounting interrupts the running turn', async () => {
++    const f = await fixture()
++    act(() => delegate(f.session))
++    f.hook.rerender({ ...f.options, busy: true })
++    f.hook.unmount()
++    expect(f.onInterrupt).toHaveBeenCalledTimes(1)
++  })
++
++  it('a spoken stop interrupts the running turn', async () => {
++    const f = await fixture()
++    act(() => delegate(f.session))
++    f.hook.rerender({ ...f.options, busy: true })
++    act(() => f.session.handlers.onTranscript({ endMs: 10, speaker: 'user', startMs: 0, text: 'stop' }))
++    await new Promise(resolve => setTimeout(resolve, 1700))
++    expect(f.onInterrupt).toHaveBeenCalledTimes(1)
++  })
++
++  it('ending with nothing running does not interrupt', async () => {
++    const f = await fixture()
++    await act(async () => {
++      await f.hook.result.current.end()
++    })
++    expect(f.onInterrupt).not.toHaveBeenCalled()
++  })
++})
 diff --git a/apps/desktop/src/lib/voice-live.ts b/apps/desktop/src/lib/voice-live.ts
 index 6bd9406..f01d3f9 100644
 --- a/apps/desktop/src/lib/voice-live.ts

@@ -1,0 +1,35 @@
+{
+  "version": "v0.1.1",
+  "date": "2026-11-20",
+  "offline": {
+    "bridge": 22,
+    "safety_gates": 10,
+    "renderer": 17
+  },
+  "real_provider": {
+    "no_drop": {
+      "delegations": 2,
+      "pair": "host-relay",
+      "clean_close": true
+    },
+    "forced_drop_resumed_attempt_2": {
+      "delegations": 2,
+      "pair": "host-relay",
+      "clean_close": true
+    },
+    "forced_drop_second_request_unheard": {
+      "count": 1,
+      "cause": "not established"
+    },
+    "turn_allocation_failures_in_relay_only_starts": {
+      "failed": 2,
+      "approx_starts": 10
+    }
+  },
+  "real_tool_via_voice": {
+    "tool_result_exact": true,
+    "audio_independently_transcribed_matches": true,
+    "physical_phone": false,
+    "agent_stub": false
+  }
+}

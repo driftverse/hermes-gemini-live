@@ -155,6 +155,8 @@ export function useVoiceLiveConversation({
   const userUtteranceRef = useRef('')
   const utteranceTimerRef = useRef<null | number>(null)
   const delegationRef = useRef<null | string>(null)
+  // Provider call ids already handed to Hermes: a replayed call (resume, retry) must not run twice.
+  const seenCallsRef = useRef(new Set<string>())
   const spokenLengthRef = useRef(0)
   const spokenResponseIdRef = useRef<null | string>(null)
   const lastToolLabelRef = useRef<null | string>(null)
@@ -229,6 +231,12 @@ export function useVoiceLiveConversation({
     userUtteranceRef.current = ''
     const session = sessionRef.current
     sessionRef.current = null
+
+    // Ending voice (button, spoken stop, unmount) must not leave a started agent turn running.
+    if (session && delegationRef.current && busyRef.current) {
+      void latest.current.onInterrupt?.()
+    }
+
     setDelegation(null)
     spokenResponseIdRef.current = null
     spokenLengthRef.current = 0
@@ -245,6 +253,7 @@ export function useVoiceLiveConversation({
     }
 
     startingRef.current = true
+    seenCallsRef.current.clear()
     const epoch = ++startEpochRef.current
 
     try {
@@ -301,6 +310,12 @@ export function useVoiceLiveConversation({
           }
 
           sessionRef.current = null
+
+          // The voice connection died mid-request: stop the agent turn it started.
+          if (delegationRef.current && busyRef.current) {
+            void latest.current.onInterrupt?.()
+          }
+
           setDelegation(null)
           setStatus('idle')
 
@@ -317,6 +332,12 @@ export function useVoiceLiveConversation({
           if (sessionRef.current !== session) {
             return
           }
+
+          if (seenCallsRef.current.has(delegationId)) {
+            return
+          }
+
+          seenCallsRef.current.add(delegationId)
 
           const { context: voiceContext, prompt: heardPrompt } = delegationPrompt(context)
           // Gemini sends the model's own clean statement of the request; prefer it over the

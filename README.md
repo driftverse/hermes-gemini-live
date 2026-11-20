@@ -35,7 +35,7 @@ and [known limitations](docs/LIMITATIONS.md).
 - `bridge/live_bridge.py`: the deployed bridge snapshot; no credentials included.
 - `integration/`: exact allowlisted Hermes source snapshots, including added tests.
 - `patches/hermes-gemini-live.patch`: reconstructs the integration against the pinned base.
-- `tests/`: offline bridge behavior tests.
+- `tests/`: offline bridge behavior and action-safety tests (32). Renderer safety tests are in `integration/apps/desktop/src/lib/`.
 - `scripts/probe_webrtc.py`: opt-in synthetic-audio integration probe, explicitly using a
   stand-in delegated answer rather than a real Hermes agent turn.
 - `scripts/relay_only_test_server.py`: test-only bridge that disables direct ICE protocols.
