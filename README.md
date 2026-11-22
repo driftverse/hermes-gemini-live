@@ -35,6 +35,16 @@ it work" question instead of answering from memory, and a guard stops a request 
 running from being started twice. Switch off with `LIVE_BRIDGE_PROGRESS_TOOL=0`. Models that are not
 async-capable keep the previous behaviour. The desktop WebSocket path does not have this yet.
 
+### Phones behind NAT without a VPN (v0.2.1)
+
+A phone on home or hotel Wi-Fi offers only private addresses. A TURN relay forwards packets only from addresses
+it has been told to expect, so the bridge's relay silently dropped the phone and ICE never connected (`never_connected`
+after 30 s). The bridge now accepts an optional `peer_ip` (the caller's public address) and adds it to the offer as a
+placeholder candidate, which makes aioice bind a TURN channel for that address and opens the relay. The Hermes
+dashboard supplies the address from `CF-Connecting-IP`; `scripts/apply_peerip_core.py` applies that small edit to a
+Hermes checkout (idempotent, refuses if the expected lines changed) and `scripts/test_peerip_core.py` tests it.
+Failed and successful connections now log an `ice report` line (candidate types and counts, never addresses).
+
 **Status: experimental, source distribution—not a one-click app.** A real native
 phone session was user-confirmed working on November 18, 2026, with server-side ICE
 completion, connected state and clean close. This does not prove every client/build,

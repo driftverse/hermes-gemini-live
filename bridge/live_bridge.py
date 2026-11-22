@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import os
@@ -168,6 +169,48 @@ async def ice_servers() -> list:
     if servers:
         _ice_cache.update(at=time.time(), servers=servers)
     return servers
+
+
+def peer_hint_sdp(sdp: str, peer_ip: str) -> str:
+    """Add the client's PUBLIC address to its offer as a placeholder candidate.
+
+    A phone behind NAT offers only private host candidates, so nothing tells the TURN relay which public
+    address its packets will come from, and the relay drops them. Adding a placeholder srflx candidate makes
+    the bridge bind a TURN channel to that address, which installs the relay permission; the phone's real
+    checks then arrive and are learned as peer-reflexive candidates. The placeholder port (9) is never used.
+    A bad, private or loopback address is ignored."""
+    try:
+        ip = ipaddress.ip_address(str(peer_ip).strip())
+    except ValueError:
+        return sdp
+    if not ip.is_global or ip.is_multicast:
+        return sdp
+    line = f"a=candidate:peerhint 1 udp 1 {ip} 9 typ srflx raddr {'::' if ip.version == 6 else '0.0.0.0'} rport 0"
+    if line in sdp:
+        return sdp
+    out: list[str] = []
+    for raw in sdp.splitlines():
+        out.append(raw)
+        if raw.startswith("a=ice-pwd:"):
+            out.append(line)
+    return "\r\n".join(out) + "\r\n"
+
+
+def ice_report(pc) -> str:
+    """One line on how ICE got on (counts and types only, never addresses). Never raises."""
+    try:
+        conn = pc.sctp.transport.transport._connection
+    except Exception:  # noqa: BLE001
+        return "ice report unavailable (no transport)"
+    try:
+        import collections
+        states = collections.Counter(str(getattr(p, "state", "?")).split(".")[-1].lower() for p in conn._check_list)
+        remote = collections.Counter(c.type for c in conn.remote_candidates)
+        picked = ", ".join(f"{p.local_candidate.type}->{p.remote_candidate.type}" for p in conn._nominated.values()) or "none"
+        return (f"ice report: pairs {dict(states) or 'none'}; remote candidates {dict(remote) or 'none'}; "
+                f"learned from inbound checks (prflx) {remote.get('prflx', 0)}; nominated {picked}")
+    except Exception as exc:  # noqa: BLE001
+        return f"ice report failed: {type(exc).__name__}"
 
 
 def _cand_summary(sdp: str) -> str:
@@ -503,9 +546,10 @@ class Session:
         if not self.closed and self.pc is not None and self.pc.connectionState != "connected":
             log.warning("%s media never connected within %.0fs (connection=%s ice=%s)",
                         self.id, seconds, self.pc.connectionState, self.pc.iceConnectionState)
+            log.warning("%s %s", self.id, ice_report(self.pc))
             await self.close("never_connected")
 
-    async def answer(self, sdp: str, stun: str) -> str:
+    async def answer(self, sdp: str, stun: str, peer_ip: str = "") -> str:
         relay = await ice_servers()
         servers = [RTCIceServer(urls=r["urls"], username=r["username"], credential=r["credential"]) for r in relay]
         if not servers and stun:
@@ -538,6 +582,8 @@ class Session:
         @pc.on("connectionstatechange")
         async def on_state():
             log.info("%s connection=%s ice=%s", self.id, pc.connectionState, pc.iceConnectionState)
+            if pc.connectionState == "connected":
+                log.info("%s %s", self.id, ice_report(pc))
             if pc.connectionState in ("failed", "closed", "disconnected") and not self.closed:
                 await self.close("connection_lost")
 
@@ -546,6 +592,10 @@ class Session:
             log.info("%s ice=%s gathering=%s", self.id, pc.iceConnectionState, pc.iceGatheringState)
 
         log.info("%s offer candidates: %s", self.id, _cand_summary(sdp))
+        if peer_ip:
+            hinted = peer_hint_sdp(sdp, peer_ip)
+            log.info("%s peer address hint %s", self.id, "added" if hinted != sdp else "ignored (not a public address)")
+            sdp = hinted
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         pc.addTrack(self.out)
         await pc.setLocalDescription(await pc.createAnswer())
@@ -602,7 +652,7 @@ async def offer(request: web.Request) -> web.Response:
         return web.json_response({"error": "model_start_failed", "model": model,
                                   "detail": str(exc)[:200]}, status=502)
     try:
-        answer = await session.answer(sdp, body.get("stun", STUN))
+        answer = await session.answer(sdp, body.get("stun", STUN), str(body.get("peer_ip") or ""))
     except Exception as exc:  # noqa: BLE001
         log.exception("webrtc answer failed")
         await session.close("webrtc_failed")

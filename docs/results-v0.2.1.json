@@ -1,0 +1,20 @@
+{
+  "version": "v0.2.1",
+  "date": "2026-11-22",
+  "physical_phone": false,
+  "nat_lab_relay_only": {
+    "control": "3/3 valid (1 excluded flake)",
+    "nated_no_hint": "0/4",
+    "nated_correct_hint": "3/3",
+    "nated_wrong_public_hint": "0/2"
+  },
+  "offline_tests": {
+    "bridge_total": 54,
+    "new": 7,
+    "new_failing_on_previous_bridge": 7
+  },
+  "core_edit_tests": {
+    "total": 8,
+    "failing_on_unpatched": 7
+  }
+}

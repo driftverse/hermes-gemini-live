@@ -480,7 +480,7 @@ def gemini_bridge_healthy() -> bool:
         return False
 
 
-def create_gemini_bridge_session(sdp_offer: str, history: Optional[list] = None) -> dict[str, Any]:
+def create_gemini_bridge_session(sdp_offer: str, history: Optional[list] = None, peer_ip: str = "") -> dict[str, Any]:
     """Answer an OpenAI-style WebRTC offer through the bridge, failing over down the model chain.
     Returns the same shape as ``create_webrtc_session``."""
     live = _live_section()
@@ -497,8 +497,11 @@ def create_gemini_bridge_session(sdp_offer: str, history: Optional[list] = None)
         if not model:
             raise RuntimeError("Every Gemini Live model failed to start: " + ", ".join(failed or models)
                                + (f" ({last})" if last else ""))
-        body = json.dumps({"sdp": sdp_offer, "model": model,
-                           "setup": build_gemini_setup(model, history)}).encode("utf-8")
+        payload: dict[str, Any] = {"sdp": sdp_offer, "model": model, "setup": build_gemini_setup(model, history)}
+        if peer_ip:
+            # The caller's public address lets the bridge open its TURN relay for a phone behind NAT.
+            payload["peer_ip"] = peer_ip
+        body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(f"{_bridge_url(gem)}/offer", data=body, method="POST",
                                      headers={"Content-Type": "application/json"})
         try:

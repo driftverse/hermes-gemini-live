@@ -1586,7 +1586,7 @@ index ae75bae..694e086 100644
  class TTSLeaseRequest(BaseModel):
      """POST /api/audio/tts-lease: ``lease`` names the toggle/surface holding the lease
 diff --git a/hermes_cli/web_routers/audio.py b/hermes_cli/web_routers/audio.py
-index af1eb3d..03c6684 100644
+index af1eb3d..1bcd81f 100644
 --- a/hermes_cli/web_routers/audio.py
 +++ b/hermes_cli/web_routers/audio.py
 @@ -16,7 +16,7 @@ import json
@@ -1607,7 +1607,7 @@ index af1eb3d..03c6684 100644
  router = APIRouter()
  
  # Late-bound so a test's monkeypatch on the owning module wins at call time.
-@@ -181,24 +183,49 @@ async def get_client_voice_config(request: Request, profile: Optional[str] = Non
+@@ -181,24 +183,68 @@ async def get_client_voice_config(request: Request, profile: Optional[str] = Non
  
  
  @router.get("/api/audio/voice-live/status")
@@ -1625,6 +1625,25 @@ index af1eb3d..03c6684 100644
      return {"ok": True, **result}
  
  
++def _caller_public_ip(request: Request) -> str:
++    """The caller's public address, else "": CF-Connecting-IP (set by the Cloudflare edge) or, when the dashboard
++    already rewrote ``request.client`` from trusted forwarding headers, that address. Only a public address is
++    returned. It is a hint that lets the media bridge open its TURN relay for a phone behind NAT; the bridge
++    validates it again, it grants nothing beyond a relay permission, and it is never logged.
++    """
++    import ipaddress
++
++    header = (request.headers.get("cf-connecting-ip") or "").strip()
++    host = (getattr(getattr(request, "client", None), "host", "") or "").strip()
++    for candidate in (header, host):
++        try:
++            if candidate and ipaddress.ip_address(candidate).is_global:
++                return candidate
++        except ValueError:
++            continue
++    return ""
++
++
  @router.post("/api/audio/voice-live/session")
 -async def create_voice_live_session(payload: VoiceLiveSessionRequest, profile: Optional[str] = None):
 +async def create_voice_live_session(request: Request, payload: VoiceLiveSessionRequest, profile: Optional[str] = None):
@@ -1644,7 +1663,7 @@ index af1eb3d..03c6684 100644
 +            # An OpenAI-contract client (WebRTC offer): answer through the local bridge.
 +            try:
 +                result = await _run_config_scoped(profile, lambda: create_gemini_bridge_session(
-+                    payload.sdp, payload.history))
++                    payload.sdp, payload.history, _caller_public_ip(request)))
 +            except ValueError as exc:
 +                raise HTTPException(status_code=503, detail=str(exc))
 +            except RuntimeError as exc:
@@ -1818,7 +1837,7 @@ index 0000000..d4c87ae
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tools/voice_live.py b/tools/voice_live.py
-index ad5d4d7..33878b1 100644
+index ad5d4d7..07d0b98 100644
 --- a/tools/voice_live.py
 +++ b/tools/voice_live.py
 @@ -22,8 +22,11 @@ Hermes turn.
@@ -1912,7 +1931,7 @@ index ad5d4d7..33878b1 100644
          "available": bool(api_key),
          "reason": None if api_key else "no OpenAI API key (set OPENAI_API_KEY or voice.gpt_live.api_key)",
          "model": str(live.get("model") or DEFAULT_LIVE_MODEL),
-@@ -184,3 +240,280 @@ def create_webrtc_session(sdp_offer: str, history: Optional[list] = None) -> dic
+@@ -184,3 +240,283 @@ def create_webrtc_session(sdp_offer: str, history: Optional[list] = None) -> dic
          detail = exc.read().decode("utf-8", "replace")[:600]
          logger.warning("GPT-Live session creation failed: %s %s", exc.code, detail)
          raise RuntimeError(f"GPT-Live session creation failed ({exc.code}): {detail}") from exc
@@ -2156,7 +2175,7 @@ index ad5d4d7..33878b1 100644
 +        return False
 +
 +
-+def create_gemini_bridge_session(sdp_offer: str, history: Optional[list] = None) -> dict[str, Any]:
++def create_gemini_bridge_session(sdp_offer: str, history: Optional[list] = None, peer_ip: str = "") -> dict[str, Any]:
 +    """Answer an OpenAI-style WebRTC offer through the bridge, failing over down the model chain.
 +    Returns the same shape as ``create_webrtc_session``."""
 +    live = _live_section()
@@ -2173,8 +2192,11 @@ index ad5d4d7..33878b1 100644
 +        if not model:
 +            raise RuntimeError("Every Gemini Live model failed to start: " + ", ".join(failed or models)
 +                               + (f" ({last})" if last else ""))
-+        body = json.dumps({"sdp": sdp_offer, "model": model,
-+                           "setup": build_gemini_setup(model, history)}).encode("utf-8")
++        payload: dict[str, Any] = {"sdp": sdp_offer, "model": model, "setup": build_gemini_setup(model, history)}
++        if peer_ip:
++            # The caller's public address lets the bridge open its TURN relay for a phone behind NAT.
++            payload["peer_ip"] = peer_ip
++        body = json.dumps(payload).encode("utf-8")
 +        req = urllib.request.Request(f"{_bridge_url(gem)}/offer", data=body, method="POST",
 +                                     headers={"Content-Type": "application/json"})
 +        try:

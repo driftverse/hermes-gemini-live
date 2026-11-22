@@ -124,3 +124,24 @@ on unaddressed speech" scenarios were unchanged and weak (side talk 1/3, TV 0/3)
 
 Not established: a real phone call (synthetic speech only), real Hermes timing and progress notes, long calls with
 several concurrent tasks, the duplicate guard on real wording, and behaviour with other voices or noisy rooms.
+
+## v0.2.1 NAT phone relay hint - 2026-11-22
+
+Reproduction first: a phone-like offer (two private host candidates, no public address) against a relay-only bridge
+produced the same server log as the real phone: `offer candidates: host/udp x2`, ICE `checking`, `never_connected` after
+30 s. Then the fix, tested with the same client:
+
+| Case (relay-only, synthetic speech) | Result |
+|---|---|
+| Control: real client candidates (include public address) | connected 3/3 valid runs (1 run excluded: known intermittent TURN allocation failure in the test server) |
+| NATed client, no hint | 0/4 connected |
+| NATed client, correct public address hint | 3/3 connected, audio both ways, packets learned as peer-reflexive |
+| NATed client, valid but wrong public address | 0/2 connected |
+
+A reserved documentation address given as a "wrong" hint is ignored by the bridge by design, so that run is not counted.
+54 offline bridge tests pass (7 new: hint insertion, rejection of private/loopback/CGNAT/invalid input, idempotence, aiortc
+parses the hinted offer, ICE report without addresses; all 7 fail on the previous bridge). The Hermes-side edit has 8 tests
+(address selection and forwarding to a fake bridge); 7 fail on an unpatched tree. The 16 existing Gemini provider tests
+still pass.
+
+Not established: a real phone on a real Wi-Fi with the VPN off (see LIMITATIONS).

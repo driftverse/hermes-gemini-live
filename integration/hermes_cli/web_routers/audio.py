@@ -195,6 +195,25 @@ async def get_voice_live_status(request: Request, profile: Optional[str] = None)
     return {"ok": True, **result}
 
 
+def _caller_public_ip(request: Request) -> str:
+    """The caller's public address, else "": CF-Connecting-IP (set by the Cloudflare edge) or, when the dashboard
+    already rewrote ``request.client`` from trusted forwarding headers, that address. Only a public address is
+    returned. It is a hint that lets the media bridge open its TURN relay for a phone behind NAT; the bridge
+    validates it again, it grants nothing beyond a relay permission, and it is never logged.
+    """
+    import ipaddress
+
+    header = (request.headers.get("cf-connecting-ip") or "").strip()
+    host = (getattr(getattr(request, "client", None), "host", "") or "").strip()
+    for candidate in (header, host):
+        try:
+            if candidate and ipaddress.ip_address(candidate).is_global:
+                return candidate
+        except ValueError:
+            continue
+    return ""
+
+
 @router.post("/api/audio/voice-live/session")
 async def create_voice_live_session(request: Request, payload: VoiceLiveSessionRequest, profile: Optional[str] = None):
     """Exchange the renderer's WebRTC SDP offer for a GPT-Live session answer.
@@ -212,7 +231,7 @@ async def create_voice_live_session(request: Request, payload: VoiceLiveSessionR
             # An OpenAI-contract client (WebRTC offer): answer through the local bridge.
             try:
                 result = await _run_config_scoped(profile, lambda: create_gemini_bridge_session(
-                    payload.sdp, payload.history))
+                    payload.sdp, payload.history, _caller_public_ip(request)))
             except ValueError as exc:
                 raise HTTPException(status_code=503, detail=str(exc))
             except RuntimeError as exc:

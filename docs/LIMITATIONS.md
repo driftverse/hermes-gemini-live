@@ -70,3 +70,16 @@
 - The model still often speaks back to speech that is not addressed to it (see the turn-taking notes);
   the status work does not change that.
 - The desktop WebSocket transport (core TypeScript) is unchanged and does not have the progress tool.
+
+## NAT phone / relay hint (v0.2.1)
+
+- Verified only with an emulated NATed client (private-only candidates, real public address unknown to the bridge) on the
+  server itself: 0/4 connected without the hint, 3/3 with the correct public address, 0/2 with a valid but wrong public
+  address. Not yet verified on a real phone on a real Wi-Fi.
+- The hint must be the address the TURN relay sees for the phone's UDP. It comes from the HTTPS request. If the phone
+  reaches the dashboard over IPv6 but its media goes out over IPv4 (or the reverse), or the network uses carrier-grade NAT
+  that gives different addresses per protocol, the hint will not match and the call will still fail.
+- A network that blocks outbound UDP to the relay entirely cannot be fixed by a hint. The `ice report` log line shows
+  whether the phone's checks reached the bridge at all (`prflx` count 0 on a failed call).
+- The dashboard edit touches Hermes core files (`audio.py`, `voice_live.py`); a Hermes update that rewrites those lines makes
+  `apply_peerip_core.py` refuse, and the bridge simply stops receiving the hint (calls behave as before).

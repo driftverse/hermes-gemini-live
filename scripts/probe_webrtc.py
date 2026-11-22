@@ -45,6 +45,23 @@ class Mic(MediaStreamTrack):
         return frame
 
 
+def fake_nat_offer(sdp):
+    """Emulate a phone behind NAT: advertise only two private host candidates that are NOT the addresses the
+    traffic really leaves from (a relay or STUN server would see the NAT's public address instead)."""
+    out, kept = [], 0
+    for line in sdp.split('\r\n'):
+        if line.startswith('a=candidate:'):
+            parts = line.split(' ')
+            if parts[2].lower() == 'udp' and parts[7] == 'host' and ':' not in parts[4] and kept < 2:
+                parts[4] = f'192.168.77.{10 + kept}'
+                kept += 1
+                out.append(' '.join(parts))
+            continue
+        out.append(line)
+    if not kept: raise RuntimeError('fake-nat: no IPv4 host candidate to rewrite')
+    return '\r\n'.join(out)
+
+
 async def run(args):
     wav = Path(args.wav)
     if not wav.is_file(): raise ValueError('Missing WAV fixture; refusing a silent test')
@@ -85,7 +102,14 @@ async def run(args):
     try:
         await pc.setLocalDescription(await pc.createOffer())
         with patch.object(vl,'_voice_section',return_value={'gpt_live':{'provider':'gemini'}}): setup=vl.build_gemini_setup(args.model)
-        body={'sdp':pc.localDescription.sdp,'model':args.model,'setup':setup}
+        offer_sdp=pc.localDescription.sdp
+        if args.fake_nat:
+            offer_sdp=fake_nat_offer(offer_sdp)
+            result['fake_nat']=True
+        body={'sdp':offer_sdp,'model':args.model,'setup':setup}
+        if args.peer_ip:
+            body['peer_ip']=urllib.request.urlopen('https://api.ipify.org',timeout=10).read().decode().strip() if args.peer_ip=='auto' else args.peer_ip
+            result['peer_ip_hint']=True
         def post():
             req=urllib.request.Request(args.bridge.rstrip('/')+'/offer',data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
             with urllib.request.urlopen(req,timeout=45) as resp: return json.load(resp)
@@ -116,4 +140,6 @@ if __name__ == '__main__':
     p.add_argument('wav'); p.add_argument('--bridge',default='http://127.0.0.1:8890')
     p.add_argument('--model',default='gemini-3.8-live'); p.add_argument('--duration',type=float,default=40)
     p.add_argument('--repeat-at',type=float,default=0); p.add_argument('--repeat-wav'); p.add_argument('--relay-only',action='store_true')
+    p.add_argument('--peer-ip',help="send the bridge a public-address hint for the client ('auto' = this machine's public IPv4)")
+    p.add_argument('--fake-nat',action='store_true',help='offer only fake private host candidates (emulates a phone behind NAT)')
     sys.exit(asyncio.run(run(p.parse_args())))
