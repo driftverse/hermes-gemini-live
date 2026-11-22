@@ -43,7 +43,7 @@ after 30 s). The bridge now accepts an optional `peer_ip` (the caller's public a
 placeholder candidate, which makes aioice bind a TURN channel for that address and opens the relay. The Hermes
 dashboard supplies the address from `CF-Connecting-IP`; `scripts/apply_peerip_core.py` applies that small edit to a
 Hermes checkout (idempotent, refuses if the expected lines changed) and `scripts/test_peerip_core.py` tests it.
-Failed and successful connections now log an `ice report` line (candidate types and counts, never addresses).
+Failed and successful connections now log an `ice report` line (candidate types and counts, never addresses). Confirmed once on a real phone on home Wi-Fi without a VPN (2026-11-22); see docs/VERIFICATION.md for what that does and does not show.
 
 **Status: experimental, source distribution—not a one-click app.** A real native
 phone session was user-confirmed working on November 18, 2026, with server-side ICE

@@ -144,4 +144,13 @@ parses the hinted offer, ICE report without addresses; all 7 fail on the previou
 (address selection and forwarding to a fake bridge); 7 fail on an unpatched tree. The 16 existing Gemini provider tests
 still pass.
 
-Not established: a real phone on a real Wi-Fi with the VPN off (see LIMITATIONS).
+### Real phone, 2026-11-22 (one call, user-reported VPN off, home Wi-Fi)
+
+Before the fix (same phone, same session type, earlier that morning): offer `host/udp x2`, ICE stayed `checking`,
+`never_connected` after 30 s. After the fix, bridge log for the working call: offer `host/udp x2`, `peer address hint added`,
+`connection=connected` about 2 s after the answer, `ice report: ... learned from inbound checks (prflx) 1; nominated relay->prflx`,
+clean `close_requested` after 37 s. That is the mechanism the lab predicted: the relay was opened for the phone's public address and
+its checks arrived as a peer-reflexive candidate. The VPN state is the user's report; the server log cannot show it.
+
+Not established: reliability over many calls, other Wi-Fi networks, other phones, long calls on this path, and what a phone on a network
+that blocks outbound UDP does.

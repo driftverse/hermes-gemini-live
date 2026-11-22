@@ -75,7 +75,8 @@
 
 - Verified only with an emulated NATed client (private-only candidates, real public address unknown to the bridge) on the
   server itself: 0/4 connected without the hint, 3/3 with the correct public address, 0/2 with a valid but wrong public
-  address. Not yet verified on a real phone on a real Wi-Fi.
+  address. First real-phone confirmation: one call on 2026-11-22 (see VERIFICATION.md); a single call is not a reliability
+  measurement, and other networks and phones remain untested.
 - The hint must be the address the TURN relay sees for the phone's UDP. It comes from the HTTPS request. If the phone
   reaches the dashboard over IPv6 but its media goes out over IPv4 (or the reverse), or the network uses carrier-grade NAT
   that gives different addresses per protocol, the hint will not match and the call will still fail.

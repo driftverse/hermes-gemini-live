@@ -1,7 +1,7 @@
 {
   "version": "v0.2.1",
   "date": "2026-11-22",
-  "physical_phone": false,
+  "physical_phone": true,
   "nat_lab_relay_only": {
     "control": "3/3 valid (1 excluded flake)",
     "nated_no_hint": "0/4",
@@ -16,5 +16,11 @@
   "core_edit_tests": {
     "total": 8,
     "failing_on_unpatched": 7
+  },
+  "real_phone": {
+    "calls": 1,
+    "vpn_off_reported_by_user": true,
+    "before_fix": "never_connected after 30 s",
+    "after_fix": "connected ~2 s after answer, nominated relay->prflx, clean close after 37 s"
   }
 }
