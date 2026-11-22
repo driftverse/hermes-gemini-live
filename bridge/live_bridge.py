@@ -37,6 +37,67 @@ log = logging.getLogger("live_bridge")
 GEMINI_WS = ("wss://generativelanguage.googleapis.com/ws/"
              "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent")
 DELEGATE = "delegate_to_hermes"
+PROGRESS = "check_hermes_progress"
+# Models whose Live API runs function calls asynchronously (the model keeps talking and listening while a
+# call is pending). Only these get the progress tool: a synchronous model is frozen until a call returns.
+ASYNC_MODEL_PREFIXES = ("gemini-3.8-live",)
+PROGRESS_TOOL = os.environ.get("LIVE_BRIDGE_PROGRESS_TOOL", "1") != "0"
+PROGRESS_SCHEDULING = os.environ.get("LIVE_BRIDGE_PROGRESS_SCHEDULING", "INTERRUPT")  # INTERRUPT | WHEN_IDLE | ""
+DEBUG_EVENTS = os.environ.get("LIVE_BRIDGE_DEBUG_EVENTS", "") == "1"  # lab only: tool events on the data channel
+DUPLICATE_REQUEST_RATIO = 0.82
+
+PROGRESS_DECLARATION = {
+    "name": PROGRESS,
+    "behavior": "NON_BLOCKING",
+    "description": (
+        "Returns the REAL current state of every task you handed to Hermes in this conversation: still running "
+        "(with Hermes' latest progress note), finished (with Hermes' result) or cancelled. Instant. Call it "
+        "whenever the user asks how something is going, whether it is done, whether it worked, what the result "
+        "was, or what is happening. Takes no arguments."),
+}
+
+DELEGATION_POLICY = (
+    "\n\nDELEGATION POLICY.\n"
+    "- delegate_to_hermes starts work in the background. After you call it, say ONE short acknowledgement and "
+    "carry on talking with the user normally; do not wait in silence. When Hermes' result arrives, tell the user "
+    "what it says, briefly, in your own words.\n"
+    "- check_hermes_progress returns the real state of work already handed to Hermes. Call it, instead of "
+    "delegating again, EVERY time the user asks how something is going, whether it is done, whether it worked, "
+    "what the result was, or what is happening, even if you checked a moment ago. Examples that ALWAYS need it, "
+    "even right after you heard a result: 'is it done?', 'did that work?', 'did it go through?', 'what happened?', "
+    "\"what's happening with that?\", 'how is it going?', 'is the server up now?', and anything else about whether "
+    "something worked, finished, is running, is healthy or is still in progress. The state can change at any "
+    "moment, so check again each time before you answer.\n"
+    "- Never say that something is done, failed, saved, sent or still in progress unless check_hermes_progress "
+    "or a Hermes result has just told you so. If you have not checked, check first. Do not guess while waiting.\n"
+    "- Do not call delegate_to_hermes again for a request that is already running; call it again only for a "
+    "genuinely new request or a correction to one."
+)
+
+
+def prepare_setup(setup: dict, model: str) -> dict:
+    """Return a copy of the Gemini setup with the progress tool + delegation policy for async-capable models."""
+    out = json.loads(json.dumps(setup))
+    if not PROGRESS_TOOL or not str(model).startswith(ASYNC_MODEL_PREFIXES):
+        return out
+    inner = out.setdefault("setup", {})
+    decls = None
+    for tool in inner.setdefault("tools", [{"functionDeclarations": []}]):
+        if isinstance(tool, dict) and "functionDeclarations" in tool:
+            decls = tool["functionDeclarations"]
+            break
+    if decls is None:
+        decls = []
+        inner["tools"].append({"functionDeclarations": decls})
+    for d in decls:
+        if d.get("name") == DELEGATE:
+            d["behavior"] = "NON_BLOCKING"
+    if not any(d.get("name") == PROGRESS for d in decls):
+        decls.append(json.loads(json.dumps(PROGRESS_DECLARATION)))
+    parts = inner.setdefault("systemInstruction", {"parts": [{"text": ""}]}).setdefault("parts", [{"text": ""}])
+    if parts and "DELEGATION POLICY." not in str(parts[0].get("text", "")):
+        parts[0]["text"] = str(parts[0].get("text", "")) + DELEGATION_POLICY
+    return out
 SETUP_TIMEOUT = 12.0
 SETTLE_QUIET_S = 2.0        # no new reply chunk for this long -> reply considered complete
 SETTLE_AFTER_THINK_S = 4.0  # ...and no tool-progress note this recent
@@ -165,7 +226,10 @@ class OutTrack(MediaStreamTrack):
 
 class Session:
     def __init__(self, api_key: str, model: str, setup: dict) -> None:
-        self.key, self.model, self.setup = api_key, model, setup
+        self.key, self.model = api_key, model
+        self.setup = prepare_setup(setup, model)
+        self.progress_enabled = PROGRESS_TOOL and str(model).startswith(ASYNC_MODEL_PREFIXES)
+        self.work: dict[str, dict] = {}     # call id -> what Hermes was asked and has actually reported
         self.id = f"gemlive_{uuid.uuid4().hex[:12]}"
         self.t0 = time.time()
         self.pc: RTCPeerConnection | None = None
@@ -271,11 +335,32 @@ class Session:
                 self.emit({"type": f"session.{kind}_transcript.delta", "delta": text,
                            "start_ms": now, "end_ms": now})
         for call in (m.get("toolCall") or {}).get("functionCalls", []):
+            if call.get("name") == PROGRESS and self.progress_enabled:
+                report = self.progress_report()
+                self.debug("progress_check", report=report)
+                response = {"result": report}
+                if PROGRESS_SCHEDULING:
+                    response["scheduling"] = PROGRESS_SCHEDULING
+                await self.gsend({"toolResponse": {"functionResponses": [
+                    {"id": call["id"], "name": PROGRESS, "response": response}]}})
+                continue
             if call.get("name") != DELEGATE:
                 await self.gsend({"toolResponse": {"functionResponses": [
                     {"id": call["id"], "name": call["name"], "response": {"error": "Unknown function"}}]}})
                 continue
             cid = call["id"]
+            request = str((call.get("args") or {}).get("request") or "").strip()[:400]
+            twin = self.running_twin(request) if cid not in self.seen else None
+            if twin:
+                # The model re-asked for work that is already running: never start it twice.
+                self.seen.add(cid)
+                log.info("%s duplicate request ignored (same as running %s)", self.id, twin)
+                self.debug("duplicate_request", request=request, of=twin)
+                await self.gsend({"toolResponse": {"functionResponses": [{
+                    "id": cid, "name": DELEGATE,
+                    "response": {"result": "That request is already running in the background. Use "
+                                           "check_hermes_progress to see how it is going."}}]}})
+                continue
             if cid in self.seen:
                 # A replayed call (e.g. after a provider resume) must never reach the client twice.
                 log.info("%s duplicate call %s ignored", self.id, cid)
@@ -285,11 +370,53 @@ class Session:
                 continue
             self.seen.add(cid)
             self.pending[cid] = {"chunks": [], "last": 0.0, "think": 0.0, "start": time.time()}
+            self.work[cid] = {"request": request, "started": time.time(), "state": "running", "notes": [],
+                              "result": None, "finished": 0.0}
+            self.debug("delegate", request=request)
             self.emit({"type": "session.delegation.created",
                        "delegation": {"id": cid, "type": "client", "target": "hermes"}})
         for cid in (m.get("toolCallCancellation") or {}).get("ids", []):
             self.pending.pop(cid, None)
             self.cancelled.add(cid)
+            if cid in self.work and self.work[cid]["state"] == "running":
+                self.work[cid].update(state="cancelled", finished=time.time())
+
+    def debug(self, what: str, **info) -> None:
+        if DEBUG_EVENTS:
+            self.emit({"type": "session.debug", "what": what, **info})
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        return " ".join("".join(ch if ch.isalnum() else " " for ch in text.lower()).split())
+
+    def running_twin(self, request: str) -> str | None:
+        """Id of a still-running task asking for (nearly) the same thing, else None."""
+        import difflib
+        want = self._norm(request)
+        if not want:
+            return None
+        for cid, w in self.work.items():
+            if w["state"] == "running" and difflib.SequenceMatcher(None, want, self._norm(w["request"])).ratio() >= DUPLICATE_REQUEST_RATIO:
+                return cid
+        return None
+
+    def progress_report(self) -> str:
+        """What Hermes has ACTUALLY reported, for the model to read aloud. Built only from recorded facts."""
+        if not self.work:
+            return "No work has been handed to Hermes in this conversation."
+        now = time.time()
+        lines = ["Real state of the work handed to Hermes (newest first). Say only what this states."]
+        for cid, w in list(self.work.items())[::-1][:5]:
+            ask = w["request"] or "(request text unavailable)"
+            if w["state"] == "running":
+                note = w["notes"][-1] if w["notes"] else "no progress note yet"
+                lines.append(f'- STILL RUNNING for {int(now - w["started"])} seconds: "{ask}". Latest note from Hermes: '
+                             f'{note}. Hermes has NOT reported a result yet, so it is not known whether it worked.')
+            elif w["state"] == "done":
+                lines.append(f'- FINISHED {int(now - w["finished"])} seconds ago: "{ask}". Hermes reported: {w["result"][:700]}')
+            else:
+                lines.append(f'- CANCELLED: "{ask}". It did not finish.')
+        return "\n".join(lines)
 
     async def respond(self, cid: str, text: str) -> None:
         self.pending.pop(cid, None)
@@ -297,6 +424,8 @@ class Session:
             return
         self.done[cid] = time.time()
         self.results[cid] = (text or "Hermes finished without anything to report.")[:6000]
+        if cid in self.work:
+            self.work[cid].update(state="done", result=self.results[cid], finished=time.time())
         await self.gsend({"toolResponse": {"functionResponses": [{
             "id": cid, "name": DELEGATE, "response": {"result": self.results[cid]}}]}})
 
@@ -339,6 +468,9 @@ class Session:
             p = self.pending.get(cid) or (next(iter(self.pending.values()), None) if not cid else None)
             if p is not None:
                 p["think"] = time.time()
+                w = self.work.get(cid or next(iter(self.pending), ""))
+                if w is not None and text.strip():
+                    w["notes"] = (w["notes"] + [text.strip()[:300]])[-6:]
                 if "without a spoken result" in text and not p["chunks"]:
                     await self.respond(cid or next(iter(self.pending)), text)
         elif kind == "session.input_audio.mute":

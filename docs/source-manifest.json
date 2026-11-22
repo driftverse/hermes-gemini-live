@@ -43,7 +43,7 @@
       "production_sha256": "2ef642daf7d030568615621a64de062242074f35c380c13164e871c5d1486a28"
     },
     "bridge/live_bridge.py": {
-      "published_sha256": "4be70f7011c110ef5088ee62a9f4d8c4f98f9e323ec12717f42485bee378c854",
+      "published_sha256": "4b9e59ac25f04c05ac84c2f9afadc749cdeac71c9cb83fca90159d145271d474",
       "production_sha256": "10422443dc728b7542a140652d5a11d24f7c193cee51c93bee9a2ab9aba9d4a4"
     },
     "apps/desktop/src/lib/voice-live-safety.test.tsx": {
@@ -51,5 +51,12 @@
       "production_sha256": null
     }
   },
-  "manifest_version": 2
+  "manifest_version": 2,
+  "known_drift": {
+    "reason": "Hermes was updated on 2026-11-21 (deployed HEAD caafe5389a). Upstream reworded comments in these files; the Gemini Live integration edits are unchanged. The patch still targets the pinned base commit.",
+    "files": {
+      "hermes_cli/web_routers/audio.py": "3876b78fc3cce6a21e4f1ac183ca62b55ca268f0392c83e47d007a6e1151fc61",
+      "apps/desktop/src/i18n/en.ts": "ddbffabda8aaa25193ad537798c163f1863cf8a4b505e5a7b6acbe2fffcea34e"
+    }
+  }
 }

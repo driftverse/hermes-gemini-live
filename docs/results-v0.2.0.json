@@ -1,0 +1,31 @@
+{
+  "version": "v0.2.0",
+  "date": "2026-11-22",
+  "synthetic_speech": true,
+  "physical_phone": false,
+  "status_checks": {
+    "hermes_still_working": {
+      "previous": "6/24",
+      "new_tool_policy": "24/24",
+      "shipped_wording": "9/9"
+    },
+    "hermes_finished": {
+      "previous": "4/28",
+      "new_tool_policy": "20/32",
+      "shipped_wording": "12/12"
+    }
+  },
+  "answered_done_while_running": 0,
+  "offline_tests": {
+    "total": 47,
+    "new": 15,
+    "new_failing_on_previous_bridge": 12
+  },
+  "regression_shipped_wording": {
+    "real_requests": "12/12",
+    "small_talk": "3/3",
+    "status_scenarios": "9/9 valid",
+    "unaddressed_speech": "1/6 (unchanged)"
+  },
+  "known_failure": "gemini-3.8-live-extended-thinking: system error, no delegation, old and new bridge"
+}

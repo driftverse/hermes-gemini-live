@@ -52,3 +52,21 @@
   disk, protected by filesystem permissions; provider billing remains the owner's responsibility.
 - No Windows/macOS bridge qualification, clean-machine full Hermes install or complete
   upstream regression suite is claimed.
+
+## Async delegation and progress tool (v0.2.0)
+
+- The progress report only contains what the client sends. Hermes progress notes arrive as
+  `session.thinking.append`; if the client sends none the report says "no progress note yet". The model
+  can only relay what is recorded.
+- Checking is a model decision. Measured against synthetic speech it checked on 21 of 21 status
+  questions with the shipped wording, but a prompt rule cannot guarantee that for every phrasing or voice.
+- The duplicate-request guard is fuzzy text matching (similarity >= 0.82) on the model's own rewording of
+  a request. It can wrongly merge two genuinely different but similar requests while one is running, and can
+  miss a duplicate that was reworded a lot. It is not an exactly-once guarantee for real actions.
+- `gemini-3.8-live-extended-thinking` fails in this bridge ("a system error occurred", no delegation) both
+  with and without these changes. It is not in the default chain; the cause was not established.
+- Only `gemini-3.8-live*` models get the tool. The 2.5 native-audio models are documented as supporting
+  async function calls but were left on the previous behaviour untested.
+- The model still often speaks back to speech that is not addressed to it (see the turn-taking notes);
+  the status work does not change that.
+- The desktop WebSocket transport (core TypeScript) is unchanged and does not have the progress tool.

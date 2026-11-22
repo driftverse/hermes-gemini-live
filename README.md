@@ -24,6 +24,17 @@ memory. The bridge translates PCM/Opus audio, transcripts, interruption signals,
 mute/close events and delegated replies. Google API keys remain server-side.
 Cloudflare TURN is optional and provides relay candidates for cross-network clients.
 
+### Delegation behaviour (v0.2.0, bridge path)
+
+On `gemini-3.8-live` the voice model works like GPT-Live's client delegation: it acknowledges, keeps
+talking and listening while Hermes works in the background, and speaks the result when it arrives.
+Gemini has no channel for the backend's progress, so the bridge keeps its own record of what Hermes
+actually reported for each task and exposes it through an instant `check_hermes_progress` tool.
+The delegation policy tells the model to call that tool for any "is it done / how is it going / did
+it work" question instead of answering from memory, and a guard stops a request that is already
+running from being started twice. Switch off with `LIVE_BRIDGE_PROGRESS_TOOL=0`. Models that are not
+async-capable keep the previous behaviour. The desktop WebSocket path does not have this yet.
+
 **Status: experimental, source distribution—not a one-click app.** A real native
 phone session was user-confirmed working on November 18, 2026, with server-side ICE
 completion, connected state and clean close. This does not prove every client/build,

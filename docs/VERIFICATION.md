@@ -100,3 +100,27 @@ kept in the evidence directory, not discarded.
 Still not established: physical phone with Tailscale off, real phone tool/memory requests, hours-long calls
 and genuine network changes, long-term-memory recall through voice (a headless session had no recall tool and
 correctly declined), and forwarding of provider cancels to the native client.
+
+## v0.2.0 async delegation and progress tool - 2026-11-22
+
+Method: synthetic speech to an isolated copy of the bridge using the real `gemini-3.8-live`; a scripted
+slow "Hermes" (22-40 s) answers delegations and sends progress notes; questions are asked while it is still
+working and after it finished. A status question counts as checked when the bridge saw a progress check (or a
+delegation) within 7 s. Sessions that failed to start (HTTP 502 at 12 concurrent sessions) are excluded.
+
+| Situation | Previous bridge | New bridge, tool + policy | Shipped wording |
+|---|---|---|---|
+| Hermes still working | 6/24 checked | 24/24 | 9/9 |
+| Hermes finished | 4/28 checked | 20/32 | 12/12 |
+
+"Answered done while still running": 0 in every variant. Answers matched the recorded state (for example
+"still restarting, waiting on the health check"). A production-path round trip after deployment gave a truthful
+mid-task answer and spoke the result when it arrived.
+
+Regression with the shipped wording (3 repeats): factual 3/3, server question 3/3, question without the name
+3/3, follow-up 3/3, small talk (no delegation) 3/3, status scenarios 9/9 valid sessions; the older "stay silent
+on unaddressed speech" scenarios were unchanged and weak (side talk 1/3, TV 0/3). 47 offline tests pass (32 existing
++ 15 new; 12 of the 15 fail against the previous bridge). `gemini-3.1-flash-live-preview` (sync-only) 3/3 unchanged.
+
+Not established: a real phone call (synthetic speech only), real Hermes timing and progress notes, long calls with
+several concurrent tasks, the duplicate guard on real wording, and behaviour with other voices or noisy rooms.
