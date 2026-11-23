@@ -84,3 +84,12 @@
   whether the phone's checks reached the bridge at all (`prflx` count 0 on a failed call).
 - The dashboard edit touches Hermes core files (`audio.py`, `voice_live.py`); a Hermes update that rewrites those lines makes
   `apply_peerip_core.py` refuse, and the bridge simply stops receiving the hint (calls behave as before).
+
+## Stronger delegation wording (v0.2.2)
+
+- The gain is modest and measured on typed text, not audio: held-out questions 51/54 delegated vs 48/54; a larger first
+  set (97/100 vs 79/100) overlapped the example phrases and overstates it. The model can still answer on its own.
+- "Which model are you using?" is answered in persona (3/3 held-out runs).
+- Real-phone effect is unmeasured: no per-turn delegation data is recorded, and the user report is anecdotal.
+- The opt-in backstop (`LIVE_BRIDGE_AUDIT=1`) can speak a second answer after the model has already answered.
+- The wording is added only for async-capable models; other models are unchanged.

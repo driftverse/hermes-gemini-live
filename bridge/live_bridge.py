@@ -22,6 +22,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import time
 import urllib.request
 import uuid
@@ -46,6 +47,18 @@ PROGRESS_TOOL = os.environ.get("LIVE_BRIDGE_PROGRESS_TOOL", "1") != "0"
 PROGRESS_SCHEDULING = os.environ.get("LIVE_BRIDGE_PROGRESS_SCHEDULING", "INTERRUPT")  # INTERRUPT | WHEN_IDLE | ""
 DEBUG_EVENTS = os.environ.get("LIVE_BRIDGE_DEBUG_EVENTS", "") == "1"  # lab only: tool events on the data channel
 DUPLICATE_REQUEST_RATIO = 0.82
+# Delegation backstop: when the model answers a substantive request itself without delegating, the bridge starts the
+# delegation on its behalf so Hermes (not Gemini's memory) has the last word, and the model then corrects itself if needed.
+AUDIT = os.environ.get("LIVE_BRIDGE_AUDIT", "0") == "1"   # opt-in: it can produce a second, spoken answer
+AUDIT_MIN_WORDS = 3
+AUDIT_MAX_PER_SESSION = 40
+_CHATTER = re.compile(
+    r"^(?:(?:hi|hello|hey|yo|thanks|thank you|thank|cheers|ok|okay|kay|cool|great|nice|sure|yes|yeah|yep|no|nope|nah|"
+    r"bye|goodbye|good morning|good night|good evening|good afternoon|see you|see ya|later|sorry|never ?mind|"
+    r"please|penny|you|so|well|alright|right|got it|i see|uh huh|mm hmm|hmm|um|uh|oh|wow|lol|haha|"
+    r"how are you|what s up|whats up|are you there|can you hear me|stop|wait|go ahead|continue|one moment|"
+    r"that s all|that is all|all good|sounds good|perfect|awesome|love it|no worries|no problem|you re welcome|"
+    r"have a good day|have a nice day|talk to you later)\b[\s,.!?]*)+$")
 
 PROGRESS_DECLARATION = {
     "name": PROGRESS,
@@ -76,11 +89,31 @@ DELEGATION_POLICY = (
 )
 
 
+DELEGATE_TOOL_RULE = (
+    " MUST be called FIRST, before you say anything at all, for EVERY request, question, check or action. You have no "
+    "knowledge of your own: not facts, not the server, not the time, not what you can do. Never answer first and call "
+    "later. Skip it ONLY for hello, thanks, goodbye or okay. If unsure, call it.")
+FINAL_RULE = (
+    " FINAL RULE (overrides everything): before you speak a single word of an answer, call delegate_to_hermes. Examples "
+    "that all need the call: 'how much disk space is free', 'what time is it in Tokyo', 'what can you do for me', 'is the "
+    "backup done', 'who won the game'. Only hello, thanks, goodbye and okay are answered without it.")
+TOOL_FIRST = os.environ.get("LIVE_BRIDGE_TOOL_FIRST", "1") != "0"
+
+
 def prepare_setup(setup: dict, model: str) -> dict:
     """Return a copy of the Gemini setup with the progress tool + delegation policy for async-capable models."""
     out = json.loads(json.dumps(setup))
     if not PROGRESS_TOOL or not str(model).startswith(ASYNC_MODEL_PREFIXES):
         return out
+    if TOOL_FIRST:
+        inner0 = out.setdefault("setup", {})
+        for tool in inner0.get("tools", []):
+            for d in (tool.get("functionDeclarations", []) if isinstance(tool, dict) else []):
+                if d.get("name") == DELEGATE and DELEGATE_TOOL_RULE not in str(d.get("description", "")):
+                    d["description"] = str(d.get("description", "")) + DELEGATE_TOOL_RULE
+        parts0 = inner0.setdefault("systemInstruction", {"parts": [{"text": ""}]}).setdefault("parts", [{"text": ""}])
+        if parts0 and "FINAL RULE" not in str(parts0[-1].get("text", "")):
+            parts0[-1]["text"] = str(parts0[-1].get("text", "")) + FINAL_RULE
     inner = out.setdefault("setup", {})
     decls = None
     for tool in inner.setdefault("tools", [{"functionDeclarations": []}]):
@@ -292,6 +325,10 @@ class Session:
         self.late: list[str] = []
         self.late_at = 0.0
         self.counter = 0
+        self.turn_in = ""                   # what the user said this turn (transcript)
+        self.turn_out = ""                  # what the model said this turn
+        self.turn_called = False            # did the model call a tool this turn
+        self.audits = 0
 
     # ---- helpers ----
     def ms(self) -> int:
@@ -367,6 +404,7 @@ class Session:
         sc = m.get("serverContent") or {}
         if sc.get("interrupted"):
             self.out.clear()
+            self.turn_out = ""
         for part in (sc.get("modelTurn") or {}).get("parts", []):
             data = (part.get("inlineData") or {}).get("data")
             if data:
@@ -374,10 +412,17 @@ class Session:
         for key, kind in (("inputTranscription", "input"), ("outputTranscription", "output")):
             text = (sc.get(key) or {}).get("text")
             if text:
+                if kind == "input":
+                    self.turn_in += text
+                else:
+                    self.turn_out += text
                 now = self.ms()
                 self.emit({"type": f"session.{kind}_transcript.delta", "delta": text,
                            "start_ms": now, "end_ms": now})
+        if sc.get("turnComplete"):
+            await self.end_turn()
         for call in (m.get("toolCall") or {}).get("functionCalls", []):
+            self.turn_called = True
             if call.get("name") == PROGRESS and self.progress_enabled:
                 report = self.progress_report()
                 self.debug("progress_check", report=report)
@@ -424,6 +469,32 @@ class Session:
             if cid in self.work and self.work[cid]["state"] == "running":
                 self.work[cid].update(state="cancelled", finished=time.time())
 
+    @staticmethod
+    def needs_check(heard: str, said: str) -> bool:
+        """True when the user asked for something substantive and the model answered it itself."""
+        words = Session._norm(heard).split()
+        if len(words) < AUDIT_MIN_WORDS or not Session._norm(said):
+            return False
+        return not _CHATTER.match(" ".join(words))
+
+    async def end_turn(self) -> None:
+        heard, said, called = self.turn_in.strip(), self.turn_out.strip(), self.turn_called
+        self.turn_in, self.turn_out, self.turn_called = "", "", False
+        if not AUDIT or called or self.closed or self.audits >= AUDIT_MAX_PER_SESSION:
+            return
+        if not self.needs_check(heard, said) or self.running_twin(heard):
+            return
+        self.audits += 1
+        cid = f"audit_{self.audits}"
+        self.seen.add(cid)
+        self.pending[cid] = {"chunks": [], "last": 0.0, "think": 0.0, "start": time.time()}
+        self.work[cid] = {"request": heard[:400], "started": time.time(), "state": "running", "notes": [],
+                          "result": None, "finished": 0.0, "audit": True}
+        log.info("%s delegation backstop: model answered without delegating", self.id)
+        self.debug("audit_delegate", request=heard[:400], model_said=said[:200])
+        self.emit({"type": "session.delegation.created",
+                   "delegation": {"id": cid, "type": "client", "target": "hermes"}})
+
     def debug(self, what: str, **info) -> None:
         if DEBUG_EVENTS:
             self.emit({"type": "session.debug", "what": what, **info})
@@ -469,6 +540,13 @@ class Session:
         self.results[cid] = (text or "Hermes finished without anything to report.")[:6000]
         if cid in self.work:
             self.work[cid].update(state="done", result=self.results[cid], finished=time.time())
+        if cid.startswith("audit_"):
+            # No tool call is open for a backstop delegation: hand the result over as plain text instead.
+            await self.gsend({"realtimeInput": {"text": (
+                "[Hermes checked the user's last request and reported the real result below. If what you told the user "
+                "differs from it, correct yourself briefly and give the real answer; if it agrees, say only a few words "
+                f"or nothing.] Real result: {self.results[cid]}")}})
+            return
         await self.gsend({"toolResponse": {"functionResponses": [{
             "id": cid, "name": DELEGATE, "response": {"result": self.results[cid]}}]}})
 

@@ -154,3 +154,18 @@ its checks arrived as a peer-reflexive candidate. The VPN state is the user's re
 
 Not established: reliability over many calls, other Wi-Fi networks, other phones, long calls on this path, and what a phone on a network
 that blocks outbound UDP does.
+
+## v0.2.2 stronger delegation wording - 2026-11-23
+
+Typed-text probes against the real `gemini-3.8-live` model, bridge-built setup, no audio and no phone.
+
+| Question set | Old wording | New wording |
+| --- | --- | --- |
+| First set, 20 questions x 5 runs (partly overlaps the example phrases) | 79/100 | 97/100 |
+| Held-out set, 18 questions x 3 runs | 48/54 | 51/54 |
+
+Greetings and thanks were wrongly delegated 0/9 on the held-out set for both wordings (1/15 in the first set for each).
+The held-out result is the one to trust. A description-only variant completed one run (17/20); the second failed on
+provider quota, so it is not evidence either way. Offline tests: 74 passing (bridge). Real phone: the user reports using
+it across several projects for about three to four days and calls the setup good; no per-turn data was recorded, so this
+is not a measured delegation rate. Results: docs/results-v0.2.2.json.

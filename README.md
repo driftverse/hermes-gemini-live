@@ -45,6 +45,20 @@ dashboard supplies the address from `CF-Connecting-IP`; `scripts/apply_peerip_co
 Hermes checkout (idempotent, refuses if the expected lines changed) and `scripts/test_peerip_core.py` tests it.
 Failed and successful connections now log an `ice report` line (candidate types and counts, never addresses). Confirmed once on a real phone on home Wi-Fi without a VPN (2026-11-22); see docs/VERIFICATION.md for what that does and does not show.
 
+### Stronger delegation without a second answer (v0.2.2)
+
+Gemini follows the delegation rules only some of the time. v0.2.2 puts the rule where the model weighs it most: the
+`delegate_to_hermes` tool description now says it must be called FIRST for every request except hello, thanks, goodbye
+and okay, and the system prompt ends with a short final reminder with examples. Nothing runs after the model has
+spoken, so there is no second answer. Switch off with `LIVE_BRIDGE_TOOL_FIRST=0`. In a typed-text probe against the real
+model, questions that did not resemble the examples were delegated 51/54 times against 48/54 before; a first question
+set showed 97/100 against 79/100 but overlapped the examples, so treat it as an upper bound. The one persistent miss is
+"which model are you using?", which the model answers in persona. Not measured on audio or over many real calls.
+
+An optional backstop (`LIVE_BRIDGE_AUDIT=1`, off by default) starts a delegation itself when the model answered a real
+request without delegating, then hands Hermes's result back as text. It is off in the author's deployment because it
+produces a second, spoken answer.
+
 **Status: experimental, source distribution—not a one-click app.** A real native
 phone session was user-confirmed working on November 18, 2026, with server-side ICE
 completion, connected state and clean close. This does not prove every client/build,
@@ -56,7 +70,7 @@ and [known limitations](docs/LIMITATIONS.md).
 - `bridge/live_bridge.py`: the deployed bridge snapshot; no credentials included.
 - `integration/`: exact allowlisted Hermes source snapshots, including added tests.
 - `patches/hermes-gemini-live.patch`: reconstructs the integration against the pinned base.
-- `tests/`: offline bridge behavior and action-safety tests (32). Renderer safety tests are in `integration/apps/desktop/src/lib/`.
+- `tests/`: offline bridge behavior and action-safety tests (74). Renderer safety tests are in `integration/apps/desktop/src/lib/`.
 - `scripts/probe_webrtc.py`: opt-in synthetic-audio integration probe, explicitly using a
   stand-in delegated answer rather than a real Hermes agent turn.
 - `scripts/relay_only_test_server.py`: test-only bridge that disables direct ICE protocols.

@@ -1,0 +1,29 @@
+{
+ "version": "v0.2.2",
+ "date": "2026-11-23",
+ "method": "typed-text probe against the real gemini-3.8-live model, bridge setup built by prepare_setup; no audio, no phone",
+ "tool_first_wording": {
+  "first_set_20_questions_x5_runs": {
+   "old_wording": "79/100 delegated",
+   "new_wording": "97/100 delegated",
+   "caveat": "about four of the 20 questions resembled the example phrases in the new wording, so this overstates the gain"
+  },
+  "held_out_18_questions_x3_runs": {
+   "old_wording": "48/54 delegated",
+   "new_wording": "51/54 delegated",
+   "greetings_wrongly_delegated": "0/9 for both",
+   "remaining_miss": "'Which model are you using?' (answered as the persona, 3/3 runs)"
+  },
+  "variant_description_only": "1 completed run (17/20); a second run failed on provider quota, so not conclusive"
+ },
+ "backstop": {
+  "status": "opt-in (LIVE_BRIDGE_AUDIT=1), off by default and off in the author's deployment",
+  "reason": "it produced a second, spoken answer after Gemini had already answered, which the user disliked"
+ },
+ "offline_tests": {
+  "bridge_total": 74
+ },
+ "real_phone": {
+  "user_reported": "used for several projects over about 3 to 4 days; delegation still felt weaker than GPT Live before this change; after it the user reported the setup looks good. Not measured, no per-turn data recorded."
+ }
+}
